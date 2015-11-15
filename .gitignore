@@ -2,3 +2,5 @@
 node_modules
 lib
 npm-debug.log
+*.cfg
+code.asm

@@ -1,257 +1,288 @@
-/* @flow */
-import {EventEmitter} from "events";
-import {readInt32, writeInt32} from "./util";
+const POINTER_SIZE_IN_BYTES = 4;
 
-const readLength: ((buffer: Buffer, offset: number) => number) = readInt32;
-const readPointer: ((buffer: Buffer, offset: number) => number) = readInt32;
+const HEADER_SIZE_IN_QUADS = 16;
+const HEADER_OFFSET_IN_QUADS = 1;
+const HEIGHT_OFFSET_IN_QUADS = 0;
+const NEXT_OFFSET_IN_QUADS = 1;
+const PREV_OFFSET_IN_QUADS = 2;
+const POINTER_SIZE_IN_QUADS = 1;
+const POINTER_OVERHEAD_IN_QUADS = 2;
 
-const writeLength: ((buffer: Buffer, value: number, offset: number) => void) = writeInt32;
-const writePointer: ((buffer: Buffer, value: number, offset: number) => void) = writeInt32;
+const MIN_FREEABLE_SIZE_IN_QUADS = 6;
+const FIRST_BLOCK_OFFSET_IN_QUADS = HEADER_OFFSET_IN_QUADS + HEADER_SIZE_IN_QUADS + POINTER_OVERHEAD_IN_QUADS;
 
-const POINTER_SIZE = 4;
-const POINTER_OVERHEAD = POINTER_SIZE * 2;
-
-const HEADER_OFFSET = POINTER_SIZE;
-const HEADER_SIZE = 64;
-const HEIGHT_OFFSET = 0;
-const NEXT_OFFSET = 4;
-const PREV_OFFSET = 8;
-
-const MIN_FREEABLE_SIZE = 64;
-const FIRST_BLOCK = HEADER_OFFSET + HEADER_SIZE + POINTER_OVERHEAD;
-
-/**
- * The Allocator class takes a buffer and exposes two primary methods, `alloc` and `free`.
- */
-export class Allocator {
-  constructor (buffer: Buffer) {
-    this.buffer = prepare(buffer);
+export default class Allocator {
+  constructor (buffer: Buffer|ArrayBuffer, byteOffset: number = 0) {
+    if (buffer instanceof Buffer) {
+      this.buffer = buffer.buffer;
+      this.byteOffset = buffer.byteOffset;
+    }
+    else {
+      this.buffer = buffer;
+      this.byteOffset = byteOffset;
+    }
+    this.int32Array = prepare(new Int32Array(this.buffer, this.byteOffset));
   }
+
 
   /**
    * Allocate a given number of bytes and return the offset.
    * If allocation fails, returns 0.
    */
   alloc (numberOfBytes: number): number {
-    return alloc(this.buffer, numberOfBytes);
+    const minimumSize: number = bytesToQuads(numberOfBytes|0);
+    const int32Array: Int32Array = this.int32Array;
+    const block: number = findFreeBlock(int32Array, minimumSize)|0;
+    if (block <= HEADER_OFFSET_IN_QUADS) {
+      return 0;
+    }
+    const blockSize: number = readSize(int32Array, block)|0;
+    if (blockSize - minimumSize >= MIN_FREEABLE_SIZE_IN_QUADS) {
+      split(int32Array, block, minimumSize, blockSize);
+    }
+    else {
+      remove(int32Array, block);
+    }
+    return quadsToBytes(block);
   }
 
   /**
    * Free a number of bytes from the given address.
    */
   free (block: number): number {
-    return free(this.buffer, block);
+    const int32Array: Int32Array = this.int32Array;
+    block = bytesToQuads(block|0);
+    if (block < FIRST_BLOCK_OFFSET_IN_QUADS) {
+      return 0;
+    }
+    const preceding: number = getFreeBlockBefore(int32Array, block)|0;
+    const trailing: number = getFreeBlockAfter(int32Array, block)|0;
+    if (preceding !== 0) {
+      if (trailing !== 0) {
+        return quadsToBytes(insertMiddle(int32Array, preceding, block, trailing));
+      }
+      else {
+        return quadsToBytes(insertAfter(int32Array, preceding, block));
+      }
+    }
+    else if (trailing !== 0) {
+      return quadsToBytes(insertBefore(int32Array, trailing, block));
+    }
+    else {
+      return quadsToBytes(insert(int32Array, block, readSize(int32Array, block)|0));
+    }
   }
 
   inspect () {
-    return inspect(this.buffer);
-  }
-}
-
-/**
- * Prepare the given buffer and ensure it contains a valid header.
- */
-export function prepare (buffer: Buffer): Buffer {
-  if (!verifyHeader(buffer)) {
-    writeInitialHeader(buffer);
-  }
-  return buffer;
-}
-
-/**
- * Allocate a given number of bytes and return the offset.
- * If allocation fails, returns 0.
- */
-export function alloc (buffer: Buffer, numberOfBytes: number): number {
-  const block: number = findFreeBlock(buffer, numberOfBytes);
-  if (block <= HEADER_OFFSET) {
-    return 0;
-  }
-  if (readSize(buffer, block) - numberOfBytes >= MIN_FREEABLE_SIZE) {
-    split(buffer, block, numberOfBytes);
-  }
-  else {
-    remove(buffer, block);
-  }
-  return block;
-}
-
-/**
- * Free a number of bytes from the given address.
- */
-export function free (buffer: Buffer, block: number): number {
-  if (block < FIRST_BLOCK) {
-    return 0;
-  }
-  const preceding: number = getFreeBlockBefore(buffer, block);
-  const trailing: number = getFreeBlockAfter(buffer, block);
-  if (preceding !== 0) {
-    if (trailing !== 0) {
-      return insertMiddle(buffer, preceding, block, trailing);
+    const int32Array: Int32Array = this.int32Array;
+    const blocks: {type: string; size: number; pointers?: [number, number][]}[] = [];
+    let pointer: number = FIRST_BLOCK_OFFSET_IN_QUADS;
+    while (pointer < int32Array.length - POINTER_SIZE_IN_QUADS) {
+      const size: number = readSize(int32Array, pointer);
+      if (size < POINTER_OVERHEAD_IN_QUADS) {
+        throw new Error(`Got invalid sized chunk at ${quadsToBytes(pointer)} (${quadsToBytes(size)})`);
+      }
+      if (isFree(int32Array, pointer)) {
+        blocks.push({
+          type: 'free',
+          offset: quadsToBytes(pointer),
+          size: quadsToBytes(size),
+          pointers: [
+            [quadsToBytes(readPrev(int32Array, pointer)), quadsToBytes(readNext(int32Array, pointer))]
+          ]
+        });
+      }
+      else {
+        blocks.push({
+          type: 'used',
+          offset: quadsToBytes(pointer),
+          size: quadsToBytes(size)
+        });
+      }
+      pointer += size + POINTER_OVERHEAD_IN_QUADS;
     }
-    else {
-      return insertAfter(buffer, preceding, block);
-    }
-  }
-  else if (trailing !== 0) {
-    return insertBefore(buffer, trailing, block);
-  }
-  else {
-    return insert(buffer, block);
+    return {blocks};
   }
 }
 
 /**
- * Inspect a freelist in a buffer and return details about the memory layout.
+ * Prepare the given int32Array and ensure it contains a valid header.
  */
-export function inspect (buffer: Buffer): Object {
-  const blocks: {type: string; size: number; pointers?: [number, number][]}[] = [];
-  let pointer: number = FIRST_BLOCK;
-  while (pointer < buffer.length - POINTER_SIZE) {
-    const size: number = readSize(buffer, pointer);
-    if (size < POINTER_OVERHEAD) {
-      throw new Error(`Got invalid sized chunk at ${pointer} (${size})`);
-    }
-    if (isFree(buffer, pointer)) {
-      blocks.push({
-        type: 'free',
-        offset: pointer,
-        size: size,
-        pointers: [
-          [readPrev(buffer, pointer), readNext(buffer, pointer)]
-        ]
-      });
-    }
-    else {
-      blocks.push({
-        type: 'used',
-        offset: pointer,
-        size: size
-      });
-    }
-    pointer += size + POINTER_OVERHEAD;
+export function prepare (int32Array: Int32Array): Int32Array {
+  if (!verifyHeader(int32Array)) {
+    writeInitialHeader(int32Array);
   }
-  return {blocks};
+  return int32Array;
 }
 
 /**
- * Verify that the buffer contains a valid header.
+ * Verify that the int32Array contains a valid header.
  */
-export function verifyHeader (buffer: Buffer): boolean {
-  return readSize(buffer, HEADER_OFFSET) === HEADER_SIZE && readLength(buffer, HEADER_OFFSET + HEADER_SIZE) === HEADER_SIZE;
+export function verifyHeader (int32Array: Int32Array): boolean {
+  return readSize(int32Array, HEADER_OFFSET_IN_QUADS) === HEADER_SIZE_IN_QUADS
+      && int32Array[HEADER_OFFSET_IN_QUADS + HEADER_SIZE_IN_QUADS] === HEADER_SIZE_IN_QUADS;
 }
 
 /**
- * Write the initial header for an empty buffer.
+ * Write the initial header for an empty int32Array.
  */
-function writeInitialHeader (buffer: Buffer) {
-  const block = FIRST_BLOCK;
-  const blockSize = buffer.length - (HEADER_OFFSET + HEADER_SIZE + POINTER_OVERHEAD + POINTER_SIZE);
-  writeSize(buffer, HEADER_SIZE, HEADER_OFFSET);
-  writeNext(buffer, block, HEADER_OFFSET);
-  writePrev(buffer, block, HEADER_OFFSET);
-  writeSize(buffer, blockSize, block);
-  writeNext(buffer, HEADER_OFFSET, block);
-  writePrev(buffer, HEADER_OFFSET, block);
+function writeInitialHeader (int32Array: Int32Array) {
+  const header = HEADER_OFFSET_IN_QUADS;
+  const headerSize = HEADER_SIZE_IN_QUADS;
+  const block = FIRST_BLOCK_OFFSET_IN_QUADS;
+  const blockSize = int32Array.length - (header + headerSize + POINTER_OVERHEAD_IN_QUADS + POINTER_SIZE_IN_QUADS);
+
+  writeSize(int32Array, headerSize, header);
+  writeHeight(int32Array, 1, header);
+  writeNext(int32Array, block, header);
+  writePrev(int32Array, block, header);
+
+  writeSize(int32Array, blockSize, block);
+  writeHeight(int32Array, 1, block);
+  writeNext(int32Array, header, block);
+  writePrev(int32Array, header, block);
 }
 
-
+/**
+ * Convert quads to bytes.
+ */
+function quadsToBytes (num: number): number {
+  num = num|0;
+  return num * POINTER_SIZE_IN_BYTES;
+}
 
 /**
- * Find a free block with at least the given number of bytes and return its address.
+ * Convert bytes to quads.
  */
-function findFreeBlock (buffer: Buffer, numberOfBytes: number): number {
-  let block: number = readPointer(buffer, HEADER_OFFSET + NEXT_OFFSET);
-  while (block > HEADER_OFFSET) {
-    const blockSize: number = readSize(buffer, block);
-    if (blockSize >= numberOfBytes) {
-      return block;
-    }
-    block = readNext(buffer, block);
-  }
-  return 0;
+function bytesToQuads (num: number): number {
+  num = num|0;
+  return Math.ceil(num / POINTER_SIZE_IN_BYTES);
+}
+
+/**
+ * Read the height from the given block.
+ */
+function readHeight (int32Array: Int32Array, block: number): number {
+  block = block|0;
+  return int32Array[block + HEIGHT_OFFSET_IN_QUADS];
+}
+
+/**
+ * Write the height to the given block.
+ */
+function writeHeight (int32Array: Int32Array, value: number, block: number) {
+  block = block|0;
+  value = value|0;
+  int32Array[block + HEIGHT_OFFSET_IN_QUADS] = value;
 }
 
 /**
  * Read the next item from the given block.
  */
-function readNext (buffer: Buffer, block: number): number {
-  return readPointer(buffer, block + NEXT_OFFSET);
-}
-
-/**
- * Read the previous item from the given block.
- */
-function readPrev (buffer: Buffer, block: number): number {
-  return readPointer(buffer, block + PREV_OFFSET);
+function readNext (int32Array: Int32Array, block: number): number {
+  block = block|0;
+  return int32Array[block + NEXT_OFFSET_IN_QUADS];
 }
 
 /**
  * Write the next item to the given block.
  */
-function writeNext (buffer: Buffer, value: number, block: number) {
-  writePointer(buffer, value, block + NEXT_OFFSET);
+function writeNext (int32Array: Int32Array, value: number, block: number) {
+  block = block|0;
+  value = value|0;
+  int32Array[block + NEXT_OFFSET_IN_QUADS] = value;
+}
+
+/**
+ * Read the previous item from the given block.
+ */
+function readPrev (int32Array: Int32Array, block: number): number {
+  block = block|0;
+  return int32Array[block + PREV_OFFSET_IN_QUADS];
 }
 
 /**
  * Write the previous item to the given block.
  */
-function writePrev (buffer: Buffer, value: number, block: number) {
-  writePointer(buffer, value, block + PREV_OFFSET);
+function writePrev (int32Array: Int32Array, value: number, block: number) {
+  block = block|0;
+  value = value|0;
+  int32Array[block + PREV_OFFSET_IN_QUADS] = value;
 }
 
 /**
  * Read the size of the block at the given address.
  */
-function readSize (buffer: Buffer, block: number): number {
-  return Math.abs(readLength(buffer, block - POINTER_SIZE));
+function readSize (int32Array: Int32Array, block: number): number {
+  block = block|0;
+  const size: number = int32Array[block - 1];
+  return (size ^ (size >> 31)) - (size >> 31);
 }
 
 /**
  * Write the size of the block at the given address.
  */
-function writeSize (buffer: Buffer, size: number, block: number): void {
-  writeLength(buffer, size, block - POINTER_SIZE);
-  writeLength(buffer, size, block + Math.abs(size));
+function writeSize (int32Array: Int32Array, size: number, block: number): void {
+  block = block|0;
+  size = size|0;
+  int32Array[block - 1] = size;
+  int32Array[block + ((size ^ (size >> 31)) - (size >> 31))] = size;
 }
+
+
+/**
+ * Find a free block with at least the given size and return its address.
+ */
+function findFreeBlock (int32Array: Int32Array, minimumSize: number): number {
+  minimumSize = minimumSize|0;
+  let block: number = int32Array[HEADER_OFFSET_IN_QUADS + NEXT_OFFSET_IN_QUADS];
+  while (block > HEADER_OFFSET_IN_QUADS) {
+    const blockSize: number = readSize(int32Array, block);
+    if (blockSize >= minimumSize) {
+      return block;
+    }
+    block = readNext(int32Array, block);
+  }
+  return 0;
+}
+
 
 /**
  * Split the given block after a certain number of bytes and add the second half to the freelist.
  */
-function split (buffer: Buffer, block: number, numberOfBytes: number): void {
-  const blockSize: number = readSize(buffer, block);
-  const next: number = readNext(buffer, block);
-  const prev: number = readPrev(buffer, block);
-  writeNext(buffer, next, prev);
-  writePrev(buffer, prev, next);
+function split (int32Array: Int32Array, block: number, firstSize: number, blockSize: number): void {
+  const next: number = readNext(int32Array, block);
+  const prev: number = readPrev(int32Array, block);
+  writeNext(int32Array, next, prev);
+  writePrev(int32Array, prev, next);
   // mark the block as allocated
-  writeSize(buffer, -numberOfBytes, block);
+  writeSize(int32Array, -firstSize, block);
 
-  const second = block + numberOfBytes + POINTER_OVERHEAD;
-  const secondSize = blockSize - (second - block);
-  insert(buffer, second, secondSize);
+  const second = (block + firstSize + POINTER_OVERHEAD_IN_QUADS);
+  const secondSize = (blockSize - (second - block));
+  insert(int32Array, second, secondSize);
 }
 
 /**
  * Remove the given block from the freelist and mark it as allocated.
  */
-function remove (buffer: Buffer, block: number, blockSize: number = readSize(buffer, block)): void {
-  const next: number = readNext(buffer, block);
-  const prev: number = readPrev(buffer, block);
-  writeNext(buffer, next, prev);
-  writePrev(buffer, prev, next);
+function remove (int32Array: Int32Array, block: number, blockSize: number = readSize(int32Array, block)|0): void {
+  const next: number = readNext(int32Array, block);
+  const prev: number = readPrev(int32Array, block);
+  writeNext(int32Array, next, prev);
+  writePrev(int32Array, prev, next);
   // invert the size sign to signify an allocated block
-  writeSize(buffer, -blockSize, block);
+  writeSize(int32Array, -blockSize, block);
 }
 
 /**
  * Determine whether the block at the given address is free or not.
  */
-function isFree (buffer: Buffer, block: number): boolean {
-  if (block < HEADER_SIZE) {
+function isFree (int32Array: Int32Array, block: number): boolean {
+  if (block < HEADER_SIZE_IN_QUADS) {
     return false;
   }
-  const length: number = readLength(buffer, block - POINTER_SIZE);
+  const length: number = int32Array[block - POINTER_SIZE_IN_QUADS];
   if (length < 0) {
     return false;
   }
@@ -260,30 +291,31 @@ function isFree (buffer: Buffer, block: number): boolean {
   }
 }
 
+
 /**
  * Get the address of the block before the given one and return the address *if it is free*,
  * otherwise 0.
  */
-function getFreeBlockBefore (buffer: Buffer, block: number): number {
-  if (block <= FIRST_BLOCK) {
+function getFreeBlockBefore (int32Array: Int32Array, block: number): number {
+  if (block <= FIRST_BLOCK_OFFSET_IN_QUADS) {
     return 0;
   }
-  const beforeSize: number = readLength(buffer, block - POINTER_OVERHEAD)
-  if (beforeSize < POINTER_OVERHEAD) {
+  const beforeSize: number = int32Array[block - POINTER_OVERHEAD_IN_QUADS];
+  if (beforeSize < POINTER_OVERHEAD_IN_QUADS) {
     return 0;
   }
-  return block - (POINTER_OVERHEAD + beforeSize);
+  return block - (POINTER_OVERHEAD_IN_QUADS + beforeSize);
 }
 
 /**
  * Get the address of the block after the given one and return its address *if it is free*,
  * otherwise 0.
  */
-function getFreeBlockAfter (buffer: Buffer, block: number): number {
-  const blockSize: number = readSize(buffer, block);
-  const next: number = block + blockSize + POINTER_OVERHEAD;
-  const nextSize: number = readLength(buffer, next - POINTER_SIZE);
-  if (nextSize < POINTER_OVERHEAD) {
+function getFreeBlockAfter (int32Array: Int32Array, block: number): number {
+  const blockSize: number = readSize(int32Array, block);
+  const next: number = (block + blockSize + POINTER_OVERHEAD_IN_QUADS);
+  const nextSize: number = int32Array[next - POINTER_SIZE_IN_QUADS];
+  if (nextSize < POINTER_OVERHEAD_IN_QUADS) {
     return 0;
   }
   return next;
@@ -293,23 +325,23 @@ function getFreeBlockAfter (buffer: Buffer, block: number): number {
 /**
  * Insert the given block into the freelist and return the number of bytes that were freed.
  */
-function insert (buffer: Buffer, block: number, blockSize: number = readSize(buffer, block)): number {
-  let next: number = readPointer(buffer, NEXT_OFFSET);
-  let prev: number = HEADER_OFFSET;
-  while (next > HEADER_OFFSET) {
-    const nextSize: number = readSize(buffer, next);
+function insert (int32Array: Int32Array, block: number, blockSize: number): number {
+  let next: number = int32Array[NEXT_OFFSET_IN_QUADS];
+  let prev: number = HEADER_OFFSET_IN_QUADS;
+  while (next > HEADER_OFFSET_IN_QUADS) {
+    const nextSize: number = readSize(int32Array, next);
     if (nextSize >= blockSize) {
       break;
     }
     prev = next;
-    next = readNext(buffer, next);
+    next = readNext(int32Array, next);
   }
-  writeSize(buffer, blockSize, block);
-  writeNext(buffer, next, block);
-  writePrev(buffer, prev, block);
+  writeSize(int32Array, blockSize, block);
+  writeNext(int32Array, next, block);
+  writePrev(int32Array, prev, block);
 
-  writeNext(buffer, block, prev);
-  writePrev(buffer, block, next);
+  writeNext(int32Array, block, prev);
+  writePrev(int32Array, block, next);
 
   return blockSize;
 }
@@ -318,14 +350,14 @@ function insert (buffer: Buffer, block: number, blockSize: number = readSize(buf
  * Insert the given block into the freelist before the given free block,
  * joining them together, returning the number of bytes which were freed.
  */
-function insertBefore (buffer: Buffer, trailing: number, block: number): number {
-  remove(buffer, trailing);
-  const blockSize: number = readSize(buffer, block);
-  const trailingSize: number = readSize(buffer, trailing);
-  const size: number = blockSize + trailingSize + POINTER_OVERHEAD;
-  writeLength(buffer, size, block - POINTER_SIZE);
-  writeLength(buffer, size, trailing + trailingSize);
-  insert(buffer, block);
+function insertBefore (int32Array: Int32Array, trailing: number, block: number): number {
+  remove(int32Array, trailing);
+  const blockSize: number = readSize(int32Array, block);
+  const trailingSize: number = readSize(int32Array, trailing);
+  const size: number = (blockSize + trailingSize + POINTER_OVERHEAD_IN_QUADS);
+  int32Array[block - POINTER_SIZE_IN_QUADS] = size;
+  int32Array[trailing + trailingSize] = size;
+  insert(int32Array, block, size);
   return blockSize;
 }
 
@@ -333,15 +365,15 @@ function insertBefore (buffer: Buffer, trailing: number, block: number): number 
  * Insert the given block into the freelist in between the given free blocks,
  * joining them together, returning the number of bytes which were freed.
  */
-function insertMiddle (buffer: Buffer, preceding: number, block: number, trailing: number): number {
-  const blockSize: number = readSize(buffer, block);
-  const trailingSize: number = readSize(buffer, trailing);
-  const size: number = (trailing - preceding) + trailingSize;
-  remove(buffer, preceding);
-  remove(buffer, trailing);
-  writeLength(buffer, size, preceding - POINTER_SIZE);
-  writeLength(buffer, size, trailing + trailingSize);
-  insert(buffer, preceding, size);
+function insertMiddle (int32Array: Int32Array, preceding: number, block: number, trailing: number): number {
+  const blockSize: number = readSize(int32Array, block);
+  const trailingSize: number = readSize(int32Array, trailing);
+  const size: number = ((trailing - preceding) + trailingSize);
+  remove(int32Array, preceding);
+  remove(int32Array, trailing);
+  int32Array[preceding - POINTER_SIZE_IN_QUADS] = size;
+  int32Array[trailing + trailingSize] = size;
+  insert(int32Array, preceding, size);
   return blockSize;
 }
 
@@ -349,12 +381,12 @@ function insertMiddle (buffer: Buffer, preceding: number, block: number, trailin
  * Insert the given block into the freelist after the given free block,
  * joining them together, returning the number of bytes which were freed.
  */
-function insertAfter (buffer: Buffer, preceding: number, block: number): number {
-  remove(buffer, preceding);
-  const blockSize: number = readSize(buffer, block);
-  const size: number = (block - preceding) + blockSize;
-  writeLength(buffer, size, preceding - POINTER_SIZE);
-  writeLength(buffer, size, block + blockSize);
-  insert(buffer, preceding);
+function insertAfter (int32Array: Int32Array, preceding: number, block: number): number {
+  remove(int32Array, preceding);
+  const blockSize: number = readSize(int32Array, block);
+  const size: number = ((block - preceding) + blockSize);
+  int32Array[preceding - POINTER_SIZE_IN_QUADS] = size;
+  int32Array[block + blockSize] = size;
+  insert(int32Array, preceding, size);
   return blockSize;
 }
