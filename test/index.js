@@ -1,6 +1,18 @@
-import {Allocator} from "../src";
+import {Allocator, verifyHeader} from "../src";
 
 describe('Allocator', function () {
+
+  describe('constructor()', function () {
+    let instance;
+    it('should create a new instance', function () {
+      instance = new Allocator(new Buffer(1024));
+    });
+
+    it('should prepare the header', function () {
+      verifyHeader(instance.buffer).should.equal(true);
+    });
+  });
+
   mutate([
     128,
     64,
@@ -17,7 +29,6 @@ describe('Allocator', function () {
 function d (input) {
   console.log(JSON.stringify(input, null, 2));
 }
-
 
 function mutate (input: number[]) {
   const total = input.reduce((a, b) => a + b);

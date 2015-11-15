@@ -11,13 +11,14 @@ const writePointer: ((buffer: Buffer, value: number, offset: number) => void) = 
 const POINTER_SIZE = 4;
 const POINTER_OVERHEAD = POINTER_SIZE * 2;
 
-const HEADER_SIZE = 32;
-const LENGTH_OFFSET = 0;
+const HEADER_OFFSET = POINTER_SIZE;
+const HEADER_SIZE = 64;
+const HEIGHT_OFFSET = 0;
 const NEXT_OFFSET = 4;
 const PREV_OFFSET = 8;
 
 const MIN_FREEABLE_SIZE = 64;
-const FIRST_BLOCK = HEADER_SIZE + POINTER_SIZE;
+const FIRST_BLOCK = HEADER_OFFSET + HEADER_SIZE + POINTER_OVERHEAD;
 
 /**
  * The Allocator class takes a buffer and exposes two primary methods, `alloc` and `free`.
@@ -63,7 +64,7 @@ export function prepare (buffer: Buffer): Buffer {
  */
 export function alloc (buffer: Buffer, numberOfBytes: number): number {
   const block: number = findFreeBlock(buffer, numberOfBytes);
-  if (block === 0) {
+  if (block <= HEADER_OFFSET) {
     return 0;
   }
   if (readSize(buffer, block) - numberOfBytes >= MIN_FREEABLE_SIZE) {
@@ -134,33 +135,34 @@ export function inspect (buffer: Buffer): Object {
 }
 
 /**
+ * Verify that the buffer contains a valid header.
+ */
+export function verifyHeader (buffer: Buffer): boolean {
+  return readSize(buffer, HEADER_OFFSET) === HEADER_SIZE && readLength(buffer, HEADER_OFFSET + HEADER_SIZE) === HEADER_SIZE;
+}
+
+/**
  * Write the initial header for an empty buffer.
  */
 function writeInitialHeader (buffer: Buffer) {
   const block = FIRST_BLOCK;
-  const blockSize = buffer.length - (HEADER_SIZE + POINTER_OVERHEAD);
-  writeLength(buffer, buffer.length, LENGTH_OFFSET);
-  writePointer(buffer, block, PREV_OFFSET);
-  writePointer(buffer, block, NEXT_OFFSET);
+  const blockSize = buffer.length - (HEADER_OFFSET + HEADER_SIZE + POINTER_OVERHEAD + POINTER_SIZE);
+  writeSize(buffer, HEADER_SIZE, HEADER_OFFSET);
+  writeNext(buffer, block, HEADER_OFFSET);
+  writePrev(buffer, block, HEADER_OFFSET);
   writeSize(buffer, blockSize, block);
-  writeNext(buffer, 0, block);
-  writePrev(buffer, 0, block);
+  writeNext(buffer, HEADER_OFFSET, block);
+  writePrev(buffer, HEADER_OFFSET, block);
 }
 
-/**
- * Verify that the buffer contains a valid header.
- */
-function verifyHeader (buffer: Buffer): boolean {
-  return readLength(buffer, 0) === buffer.length;
-}
 
 
 /**
  * Find a free block with at least the given number of bytes and return its address.
  */
 function findFreeBlock (buffer: Buffer, numberOfBytes: number): number {
-  let block: number = readPointer(buffer, NEXT_OFFSET);
-  while (block > 0) {
+  let block: number = readPointer(buffer, HEADER_OFFSET + NEXT_OFFSET);
+  while (block > HEADER_OFFSET) {
     const blockSize: number = readSize(buffer, block);
     if (blockSize >= numberOfBytes) {
       return block;
@@ -202,9 +204,6 @@ function writePrev (buffer: Buffer, value: number, block: number) {
  * Read the size of the block at the given address.
  */
 function readSize (buffer: Buffer, block: number): number {
-  if (block < FIRST_BLOCK) {
-    return 0; // header block
-  }
   return Math.abs(readLength(buffer, block - POINTER_SIZE));
 }
 
@@ -296,8 +295,8 @@ function getFreeBlockAfter (buffer: Buffer, block: number): number {
  */
 function insert (buffer: Buffer, block: number, blockSize: number = readSize(buffer, block)): number {
   let next: number = readPointer(buffer, NEXT_OFFSET);
-  let prev: number = 0;
-  while (next > 0) {
+  let prev: number = HEADER_OFFSET;
+  while (next > HEADER_OFFSET) {
     const nextSize: number = readSize(buffer, next);
     if (nextSize >= blockSize) {
       break;
