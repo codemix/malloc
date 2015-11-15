@@ -17,6 +17,7 @@ const NEXT_OFFSET = 4;
 const PREV_OFFSET = 8;
 
 const MIN_FREEABLE_SIZE = 64;
+const FIRST_BLOCK = HEADER_SIZE + POINTER_SIZE;
 
 /**
  * The Allocator class takes a buffer and exposes two primary methods, `alloc` and `free`.
@@ -78,7 +79,7 @@ export function alloc (buffer: Buffer, numberOfBytes: number): number {
  * Free a number of bytes from the given address.
  */
 export function free (buffer: Buffer, block: number): number {
-  if (block < HEADER_SIZE + POINTER_SIZE) {
+  if (block < FIRST_BLOCK) {
     return 0;
   }
   const preceding: number = getFreeBlockBefore(buffer, block);
@@ -104,7 +105,7 @@ export function free (buffer: Buffer, block: number): number {
  */
 export function inspect (buffer: Buffer): Object {
   const blocks: {type: string; size: number; pointers?: [number, number][]}[] = [];
-  let pointer: number = HEADER_SIZE + POINTER_SIZE;
+  let pointer: number = FIRST_BLOCK;
   while (pointer < buffer.length - POINTER_SIZE) {
     const size: number = readSize(buffer, pointer);
     if (size < POINTER_OVERHEAD) {
@@ -136,7 +137,7 @@ export function inspect (buffer: Buffer): Object {
  * Write the initial header for an empty buffer.
  */
 function writeInitialHeader (buffer: Buffer) {
-  const block = HEADER_SIZE + POINTER_SIZE;
+  const block = FIRST_BLOCK;
   const blockSize = buffer.length - (HEADER_SIZE + POINTER_OVERHEAD);
   writeLength(buffer, buffer.length, LENGTH_OFFSET);
   writePointer(buffer, block, PREV_OFFSET);
@@ -201,7 +202,7 @@ function writePrev (buffer: Buffer, value: number, block: number) {
  * Read the size of the block at the given address.
  */
 function readSize (buffer: Buffer, block: number): number {
-  if (block < HEADER_SIZE) {
+  if (block < FIRST_BLOCK) {
     return 0; // header block
   }
   return Math.abs(readLength(buffer, block - POINTER_SIZE));
@@ -265,7 +266,7 @@ function isFree (buffer: Buffer, block: number): boolean {
  * otherwise 0.
  */
 function getFreeBlockBefore (buffer: Buffer, block: number): number {
-  if (block <= HEADER_SIZE + POINTER_SIZE) {
+  if (block <= FIRST_BLOCK) {
     return 0;
   }
   const beforeSize: number = readLength(buffer, block - POINTER_OVERHEAD)
