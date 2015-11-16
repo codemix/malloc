@@ -42,6 +42,20 @@ describe('Allocator', function () {
     });
   });
 
+  describe('workflow', function () {
+    let instance = new Allocator(new Buffer(1024));
+
+    it('should allocate some bytes', function () {
+      const addresses = Array.from({length: 4}, () => instance.alloc(64));
+      instance.free(addresses[1]);
+      instance.free(addresses[2]);
+
+      instance.alloc(128);
+
+    });
+  });
+
+
   mutate([
     128,
     64,

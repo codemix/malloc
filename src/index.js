@@ -11,17 +11,21 @@ const POINTER_OVERHEAD_IN_QUADS = 2;
 const MIN_FREEABLE_SIZE_IN_QUADS = 6;
 const FIRST_BLOCK_OFFSET_IN_QUADS = HEADER_OFFSET_IN_QUADS + HEADER_SIZE_IN_QUADS + POINTER_OVERHEAD_IN_QUADS;
 
+const MAX_HEIGHT = 32;
+
 export default class Allocator {
   constructor (buffer: Buffer|ArrayBuffer, byteOffset: number = 0) {
     if (buffer instanceof Buffer) {
       this.buffer = buffer.buffer;
       this.byteOffset = buffer.byteOffset;
+      this.length = buffer.length;
     }
     else {
       this.buffer = buffer;
       this.byteOffset = byteOffset;
+      this.length = buffer.length - byteOffset;
     }
-    this.int32Array = prepare(new Int32Array(this.buffer, this.byteOffset));
+    this.int32Array = prepare(new Int32Array(this.buffer, this.byteOffset, bytesToQuads(this.length)));
   }
 
 
@@ -41,7 +45,7 @@ export default class Allocator {
       split(int32Array, block, minimumSize, blockSize);
     }
     else {
-      remove(int32Array, block);
+      remove(int32Array, block, blockSize);
     }
     return quadsToBytes(block);
   }
@@ -258,15 +262,17 @@ function split (int32Array: Int32Array, block: number, firstSize: number, blockS
   // mark the block as allocated
   writeSize(int32Array, -firstSize, block);
 
-  const second = (block + firstSize + POINTER_OVERHEAD_IN_QUADS);
-  const secondSize = (blockSize - (second - block));
+  const second: number = (block + firstSize + POINTER_OVERHEAD_IN_QUADS);
+  const secondSize: number = (blockSize - (second - block));
   insert(int32Array, second, secondSize);
 }
 
 /**
  * Remove the given block from the freelist and mark it as allocated.
  */
-function remove (int32Array: Int32Array, block: number, blockSize: number = readSize(int32Array, block)|0): void {
+function remove (int32Array: Int32Array, block: number, blockSize: number): void {
+  block = block|0;
+  blockSize = blockSize|0;
   const next: number = readNext(int32Array, block);
   const prev: number = readPrev(int32Array, block);
   writeNext(int32Array, next, prev);
@@ -326,7 +332,7 @@ function getFreeBlockAfter (int32Array: Int32Array, block: number): number {
  * Insert the given block into the freelist and return the number of bytes that were freed.
  */
 function insert (int32Array: Int32Array, block: number, blockSize: number): number {
-  let next: number = int32Array[NEXT_OFFSET_IN_QUADS];
+  let next: number = int32Array[HEADER_OFFSET_IN_QUADS + NEXT_OFFSET_IN_QUADS];
   let prev: number = HEADER_OFFSET_IN_QUADS;
   while (next > HEADER_OFFSET_IN_QUADS) {
     const nextSize: number = readSize(int32Array, next);
@@ -337,11 +343,17 @@ function insert (int32Array: Int32Array, block: number, blockSize: number): numb
     next = readNext(int32Array, next);
   }
   writeSize(int32Array, blockSize, block);
-  writeNext(int32Array, next, block);
-  writePrev(int32Array, prev, block);
+  const blockHeight = generateHeight(int32Array, blockSize);
+  writeHeight(int32Array, blockHeight, block);
+  for (let i = 0; i < blockHeight; i++) {
+    int32Array[block + NEXT_OFFSET_IN_QUADS + (i * 2)] = next;
+    int32Array[block + PREV_OFFSET_IN_QUADS + (i * 2)] = prev;
 
-  writeNext(int32Array, block, prev);
-  writePrev(int32Array, block, next);
+    /*int32Array[prev + NEXT_OFFSET_IN_QUADS + (i * 2)] = block;
+    int32Array[next + PREV_OFFSET_IN_QUADS + (i * 2)] = block;*/
+  }
+  int32Array[prev + NEXT_OFFSET_IN_QUADS] = block;
+  int32Array[next + PREV_OFFSET_IN_QUADS] = block;
 
   return blockSize;
 }
@@ -351,9 +363,9 @@ function insert (int32Array: Int32Array, block: number, blockSize: number): numb
  * joining them together, returning the number of bytes which were freed.
  */
 function insertBefore (int32Array: Int32Array, trailing: number, block: number): number {
-  remove(int32Array, trailing);
   const blockSize: number = readSize(int32Array, block);
   const trailingSize: number = readSize(int32Array, trailing);
+  remove(int32Array, trailing, trailingSize);
   const size: number = (blockSize + trailingSize + POINTER_OVERHEAD_IN_QUADS);
   int32Array[block - POINTER_SIZE_IN_QUADS] = size;
   int32Array[trailing + trailingSize] = size;
@@ -367,10 +379,11 @@ function insertBefore (int32Array: Int32Array, trailing: number, block: number):
  */
 function insertMiddle (int32Array: Int32Array, preceding: number, block: number, trailing: number): number {
   const blockSize: number = readSize(int32Array, block);
+  const precedingSize: number = (block - preceding) - POINTER_OVERHEAD_IN_QUADS;
   const trailingSize: number = readSize(int32Array, trailing);
   const size: number = ((trailing - preceding) + trailingSize);
-  remove(int32Array, preceding);
-  remove(int32Array, trailing);
+  remove(int32Array, preceding, precedingSize);
+  remove(int32Array, trailing, trailingSize);
   int32Array[preceding - POINTER_SIZE_IN_QUADS] = size;
   int32Array[trailing + trailingSize] = size;
   insert(int32Array, preceding, size);
@@ -382,11 +395,40 @@ function insertMiddle (int32Array: Int32Array, preceding: number, block: number,
  * joining them together, returning the number of bytes which were freed.
  */
 function insertAfter (int32Array: Int32Array, preceding: number, block: number): number {
-  remove(int32Array, preceding);
+  const precedingSize: number = (block - preceding) - POINTER_OVERHEAD_IN_QUADS;
+  remove(int32Array, preceding, precedingSize);
   const blockSize: number = readSize(int32Array, block);
   const size: number = ((block - preceding) + blockSize);
   int32Array[preceding - POINTER_SIZE_IN_QUADS] = size;
   int32Array[block + blockSize] = size;
   insert(int32Array, preceding, size);
   return blockSize;
+}
+
+/**
+ * Generate a random height for a block, growing the list height by 1 if required.
+ */
+function generateHeight (int32Array: Int32Array, blockSize: number): number {
+  const listHeight = int32Array[HEADER_OFFSET_IN_QUADS + HEIGHT_OFFSET_IN_QUADS];
+  let height = randomHeight();
+  if (blockSize < (height * 2) + 1) {
+    height = (blockSize - 1) / 2;
+  }
+  if (height > listHeight) {
+    return int32Array[HEADER_OFFSET_IN_QUADS + HEIGHT_OFFSET_IN_QUADS] = listHeight + 1;
+  }
+  else {
+    return height;
+  }
+}
+
+/**
+ * Generate a random height for a new block.
+ */
+function randomHeight (): number {
+  let height: number = 1;
+  for (let r: number =  Math.ceil(Math.random() * 2147483648); (r & 1) === 1 && height < MAX_HEIGHT; r >>= 1) {
+    height++;
+  }
+  return height;
 }

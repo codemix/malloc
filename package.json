@@ -21,7 +21,7 @@
     "test": "mocha",
     "watch": "mocha --watch",
     "build": "babel -d ./lib ./src",
-    "perf": "rm *.cfg; npm run build && node --print-opt-code --trace-hydrogen --trace-phase=Z --trace-deopt --code-comments --hydrogen-track-positions --redirect-code-traces --redirect-code-traces-to=code.asm ./perf.js"
+    "perf": "rm *.cfg; npm run build && node --max-inlined-source-size=2000 --print-opt-code --trace-hydrogen --trace-phase=Z --trace-deopt --code-comments --hydrogen-track-positions --redirect-code-traces --redirect-code-traces-to=code.asm ./perf.js"
   },
   "repository": {
     "type": "git",
