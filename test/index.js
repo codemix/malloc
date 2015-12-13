@@ -1,40 +1,16 @@
 import {default as Allocator, verifyHeader} from "../src";
+import randomNumbers from "./random.json";
 
-function benchmark (name, limit, ...fns) {
-  let factor = 1;
-  if (typeof limit === 'function') {
-    fns.unshift(limit);
-    limit = 1000;
-  }
-  if (typeof fns[0] === 'number') {
-    factor = fns.shift();
-  }
-  it(`benchmark: ${name}`, benchmarkRunner(name, limit, factor, flattenBenchmarkFunctions(fns)));
-};
+const benchmark = createBenchmark();
 
-benchmark.skip = function skipBenchmark (name) {
-  it.skip(`benchmark: ${name}`);
-}
-
-benchmark.only = function benchmark (name, limit, ...fns) {
-  let factor = 1;
-  if (typeof limit !== 'number') {
-    fns.unshift(limit);
-    limit = 1000;
-  }
-  if (typeof fns[0] === 'number') {
-    factor = fns.shift();
-  }
-  it.only(`benchmark: ${name}`, benchmarkRunner(name, limit, factor, flattenBenchmarkFunctions(fns)));
-};
-
+ensureDeterministicRandom();
 
 describe('Allocator', function () {
 
   describe('constructor()', function () {
     let instance;
     it('should create a new instance', function () {
-      instance = new Allocator(new Buffer(1024));
+      instance = new Allocator(new Buffer(1024).fill(123));
     });
 
     it('should prepare the header', function () {
@@ -43,15 +19,32 @@ describe('Allocator', function () {
   });
 
   describe('workflow', function () {
-    let instance = new Allocator(new Buffer(1024));
+    let instance = new Allocator(new Buffer(4096).fill(123));
 
     it('should allocate some bytes', function () {
-      const addresses = Array.from({length: 4}, () => instance.alloc(64));
-      instance.free(addresses[1]);
-      instance.free(addresses[2]);
-
+      const address1 = instance.alloc(64);
+      const address2 = instance.alloc(64);
+      const address3 = instance.alloc(64);
       instance.alloc(128);
+      instance.free(address1);
+      instance.free(address3);
+      d(instance.inspect());
 
+    });
+
+
+    it('should work properly', function () {
+
+      const addresses = Array.from({length: 10}, (_, index) => instance.alloc(index % 2 ? 64 : 128));
+
+      const freed = addresses.filter((_, index) => index % 3 === 1).map(address => instance.free(address));
+
+
+      d(instance.inspect());
+      const addresses2 = Array.from({length: 10}, (_, index) => instance.alloc(index % 2 ? 64 : 128));
+      d(instance.inspect());
+      addresses2.forEach(address => instance.free(address));
+      d(instance.inspect());
     });
   });
 
@@ -67,10 +60,10 @@ describe('Allocator', function () {
     512
   ]);
 
-  describe('Benchmarks', function () {
+  describe.skip('Benchmarks', function () {
     let instance;
     beforeEach(() => {
-      instance = new Allocator(new Buffer(1024 * 1024 * 10));
+      instance = new Allocator(new Buffer(1024 * 1024 * 10).fill(123));
     });
 
     benchmark('allocate', 100000, {
@@ -92,7 +85,7 @@ function mutate (input: number[]) {
     const sizes = [start].concat(input.map(item => item).filter((_, i) => i !== index));
     describe(`Sizes: ${sizes.join(', ')}`, function () {
       describe('Sequential', function () {
-        const instance = new Allocator(new Buffer(4096));
+        const instance = new Allocator(new Buffer(4096).fill(123));
         let addresses;
         it('should allocate', function () {
           addresses = sizes.map(item => instance.alloc(item));
@@ -119,7 +112,7 @@ function mutate (input: number[]) {
       });
 
       describe('Alloc & Free', function () {
-        const instance = new Allocator(new Buffer(4096));
+        const instance = new Allocator(new Buffer(4096).fill(123));
         let addresses;
         it('should allocate', function () {
           addresses = sizes.map(address => instance.alloc(address));
@@ -148,7 +141,7 @@ function mutate (input: number[]) {
       });
 
       describe('Alloc, Alloc, Free, Reverse, Alloc', function () {
-        const instance = new Allocator(new Buffer(4096 * 2));
+        const instance = new Allocator(new Buffer(4096 * 2).fill(123));
         let addresses;
         it('should allocate', function () {
           addresses = sizes.reduce((addresses, size) => {
@@ -193,53 +186,92 @@ function mutate (input: number[]) {
   });
 }
 
+function createBenchmark () {
 
-
-function benchmarkRunner (name, limit, factor, fns) {
-  return async function () {
-    this.timeout(10000);
-    console.log(`\tStarting benchmark: ${name}\n`);
-    let fastest = {
-      name: null,
-      score: null
-    };
-    let slowest = {
-      name: null,
-      score: null
-    };
-    fns.forEach(([name,fn]) => {
-      const start = process.hrtime();
-      for (let j = 0; j < limit; j++) {
-        fn(j, limit);
-      }
-      let [seconds, ns] = process.hrtime(start);
-      seconds += ns / 1000000000;
-      const perSecond = Math.round(limit / seconds) * factor;
-      if (fastest.score === null || fastest.score < perSecond) {
-        fastest.name = name;
-        fastest.score = perSecond;
-      }
-      if (slowest.score === null || slowest.score > perSecond) {
-        slowest.name = name;
-        slowest.score = perSecond;
-      }
-      console.log(`\t${name} benchmark done in ${seconds.toFixed(4)} seconds, ${perSecond} operations per second.`);
-    });
-    if (fns.length > 1) {
-      const diff = (fastest.score - slowest.score) / slowest.score * 100;
-      console.log(`\n\t${fastest.name} was ${diff.toFixed(2)}% faster than ${slowest.name}`);
+  function benchmark (name, limit, ...fns) {
+    let factor = 1;
+    if (typeof limit === 'function') {
+      fns.unshift(limit);
+      limit = 1000;
     }
+    if (typeof fns[0] === 'number') {
+      factor = fns.shift();
+    }
+    it(`benchmark: ${name}`, benchmarkRunner(name, limit, factor, flattenBenchmarkFunctions(fns)));
   };
+
+  benchmark.skip = function skipBenchmark (name) {
+    it.skip(`benchmark: ${name}`);
+  }
+
+  benchmark.only = function benchmark (name, limit, ...fns) {
+    let factor = 1;
+    if (typeof limit !== 'number') {
+      fns.unshift(limit);
+      limit = 1000;
+    }
+    if (typeof fns[0] === 'number') {
+      factor = fns.shift();
+    }
+    it.only(`benchmark: ${name}`, benchmarkRunner(name, limit, factor, flattenBenchmarkFunctions(fns)));
+  };
+
+
+  function benchmarkRunner (name, limit, factor, fns) {
+    return async function () {
+      this.timeout(10000);
+      console.log(`\tStarting benchmark: ${name}\n`);
+      let fastest = {
+        name: null,
+        score: null
+      };
+      let slowest = {
+        name: null,
+        score: null
+      };
+      fns.forEach(([name,fn]) => {
+        const start = process.hrtime();
+        for (let j = 0; j < limit; j++) {
+          fn(j, limit);
+        }
+        let [seconds, ns] = process.hrtime(start);
+        seconds += ns / 1000000000;
+        const perSecond = Math.round(limit / seconds) * factor;
+        if (fastest.score === null || fastest.score < perSecond) {
+          fastest.name = name;
+          fastest.score = perSecond;
+        }
+        if (slowest.score === null || slowest.score > perSecond) {
+          slowest.name = name;
+          slowest.score = perSecond;
+        }
+        console.log(`\t${name} benchmark done in ${seconds.toFixed(4)} seconds, ${perSecond} operations per second.`);
+      });
+      if (fns.length > 1) {
+        const diff = (fastest.score - slowest.score) / slowest.score * 100;
+        console.log(`\n\t${fastest.name} was ${diff.toFixed(2)}% faster than ${slowest.name}`);
+      }
+    };
+  }
+
+  function flattenBenchmarkFunctions (fns: Array<Object|Function>): Array {
+    return fns.reduce((flat, item, index) => {
+      if (typeof item === "object") {
+        flat.push(...Object.keys(item).map(name => [name, item[name]]));
+      }
+      else {
+        flat.push([item.name || "fn" + index, item]);
+      }
+      return flat;
+    }, []);
+  }
+
+  return benchmark;
 }
 
-function flattenBenchmarkFunctions (fns: Array<Object|Function>): Array {
-  return fns.reduce((flat, item, index) => {
-    if (typeof item === "object") {
-      flat.push(...Object.keys(item).map(name => [name, item[name]]));
-    }
-    else {
-      flat.push([item.name || "fn" + index, item]);
-    }
-    return flat;
-  }, []);
+function ensureDeterministicRandom () {
+  let index = 0;
+  Math.random = function () {
+    return randomNumbers[index++ % randomNumbers.length];
+  };
 }

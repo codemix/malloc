@@ -1,8 +1,8 @@
 {
   "presets": [
     "stage-1",
-    "es2015",
+    "es2015-node5",
     "react"
   ],
-  "plugins": []
+  "plugins": ["typecheck", "contracts", "trace"]
 }
