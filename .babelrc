@@ -1,8 +1,21 @@
 {
   "presets": [
     "stage-1",
-    "es2015-node5",
+    "es2015",
     "react"
   ],
-  "plugins": ["typecheck", "contracts", "trace"]
+  "plugins": [
+    ["typecheck", {
+      "disable": {
+        "production": true
+      }
+    }],
+    ["contracts", {
+      "env": {
+        "production": {
+          "strip": true
+        }
+      }
+    }],
+    ["trace", {strip: true}]]
 }

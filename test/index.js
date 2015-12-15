@@ -19,54 +19,67 @@ describe('Allocator', function () {
   });
 
   describe('workflow', function () {
-    let instance = new Allocator(new Buffer(4096).fill(123));
+    let instance = new Allocator(new Buffer(4096).fill(127));
 
     it('should allocate some bytes', function () {
       const address1 = instance.alloc(64);
       const address2 = instance.alloc(64);
       const address3 = instance.alloc(64);
+
       instance.alloc(128);
       instance.free(address1);
       instance.free(address3);
-      d(instance.inspect());
-
     });
 
 
-    it('should work properly', function () {
-
+    it('should allocate some bytes, free some of them, allocates some more', function () {
       const addresses = Array.from({length: 10}, (_, index) => instance.alloc(index % 2 ? 64 : 128));
-
       const freed = addresses.filter((_, index) => index % 3 === 1).map(address => instance.free(address));
 
-
-      d(instance.inspect());
       const addresses2 = Array.from({length: 10}, (_, index) => instance.alloc(index % 2 ? 64 : 128));
-      d(instance.inspect());
       addresses2.forEach(address => instance.free(address));
+
       d(instance.inspect());
     });
   });
 
+  if (!process.env.MALLOC_FAST_TESTS) {
+    // Warning: Increasing the number of mutations has an exponential effect on test time.
+    mutate([
+      128,
+      64,
+      96,
+      256,
+      128,
+      72,
+      256
+    ]);
+  }
 
-  mutate([
-    128,
-    64,
-    96,
-    256,
-    128,
-    72,
-    256,
-    512
-  ]);
-
-  describe.skip('Benchmarks', function () {
+  describe('Benchmarks', function () {
+    let buffer = new Buffer(1024 * 1024 * 20);
     let instance;
     beforeEach(() => {
-      instance = new Allocator(new Buffer(1024 * 1024 * 10).fill(123));
+      buffer.fill(123);
+      instance = new Allocator(buffer);
     });
 
-    benchmark('allocate', 100000, {
+    after(() => {
+      buffer = null;
+      instance.buffer = null;
+      instance = null;
+      if (typeof GC === 'function') {
+        GC();
+      }
+    });
+
+    benchmark('allocate', 1000000, {
+      alloc () {
+        instance.alloc(20);
+      }
+    });
+
+    benchmark('allocate and free', 100000, {
       alloc () {
         instance.free(instance.alloc(128));
       }
@@ -79,13 +92,34 @@ function d (input) {
   console.log(JSON.stringify(input, null, 2));
 }
 
+function permutations (input: Array) {
+  if (input.length == 0) {
+    return [[]];
+  }
+  const result = [];
+  for (let i = 0; i < input.length; i++) {
+    const clone = input.slice();
+    const start = clone.splice(i, 1);
+    const tail = permutations(clone);
+    for (let j = 0; j < tail.length; j++) {
+      result.push(start.concat(tail[j]));
+    }
+  }
+
+  return result;
+}
+
+function debugOnce (input) {
+  return [input];
+}
+
 function mutate (input: number[]) {
-  const total = input.reduce((a, b) => a + b);
-  input.forEach((start, index) => {
-    const sizes = [start].concat(input.map(item => item).filter((_, i) => i !== index));
+  //debugOnce([ 64, 72, 128, 96, 256, 128, 256]).forEach(sizes => {
+  permutations(input).forEach(sizes => {
+
     describe(`Sizes: ${sizes.join(', ')}`, function () {
       describe('Sequential', function () {
-        const instance = new Allocator(new Buffer(4096).fill(123));
+        const instance = new Allocator(new Buffer(16000).fill(123));
         let addresses;
         it('should allocate', function () {
           addresses = sizes.map(item => instance.alloc(item));
@@ -112,7 +146,7 @@ function mutate (input: number[]) {
       });
 
       describe('Alloc & Free', function () {
-        const instance = new Allocator(new Buffer(4096).fill(123));
+        const instance = new Allocator(new Buffer(16000).fill(123));
         let addresses;
         it('should allocate', function () {
           addresses = sizes.map(address => instance.alloc(address));
@@ -141,12 +175,13 @@ function mutate (input: number[]) {
       });
 
       describe('Alloc, Alloc, Free, Reverse, Alloc', function () {
-        const instance = new Allocator(new Buffer(4096 * 2).fill(123));
-        let addresses;
+        const instance = new Allocator(new Buffer(16000).fill(123));
+        let addresses, extra;
         it('should allocate', function () {
           addresses = sizes.reduce((addresses, size) => {
             return addresses.concat(instance.alloc(size), instance.alloc(size));
           }, []);
+          addresses.every(value => value.should.be.above(0));
         });
 
         it('should free half of the allocated addresses', function () {
@@ -172,8 +207,17 @@ function mutate (input: number[]) {
           });
         });
 
+        it('should allocate', function () {
+          extra = sizes.reduce((addresses, size) => {
+            return addresses.concat(instance.alloc(size));
+          }, []);
+        });
+
         it('should free the blocks', function () {
           addresses.forEach(address => instance.free(address));
+          extra.forEach(address => {
+            instance.free(address);
+          });
         });
 
         it('should inspect the freed blocks', function () {
