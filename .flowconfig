@@ -1,7 +1,33 @@
 [ignore]
 
+# Ugh
+.*/node_modules/babel.*
+.*/node_modules/babylon.*
+.*/node_modules/.*/src.*
+
+# Ignore tests
+.*/node_modules/.*/test.*
+
 [include]
 
 [libs]
+interfaces/
 
 [options]
+module.system=node
+
+munge_underscores=true
+
+suppress_type=@flowIssue
+suppress_type=@flowFixme
+suppress_type=@fixme
+
+suppress_comment=\\(.\\|\n\\)*\\@flowFixme.*
+suppress_comment=\\(.\\|\n\\)*\\@flowIssue.*
+
+esproposal.class_instance_fields=enable
+esproposal.class_static_fields=enable
+unsafe.enable_getters_and_setters=true
+
+[version]
+0.20.1

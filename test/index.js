@@ -5,6 +5,7 @@ const benchmark = createBenchmark();
 
 ensureDeterministicRandom();
 
+
 describe('Allocator', function () {
 
   describe('constructor()', function () {
@@ -15,6 +16,21 @@ describe('Allocator', function () {
 
     it('should prepare the header', function () {
       verifyHeader(instance.int32Array).should.equal(true);
+    });
+  });
+
+  describe('Out of memory', function () {
+    let instance;
+    it('should create a new instance', function () {
+      instance = new Allocator(new Buffer(1024).fill(123));
+    });
+    it('should allocate some space', function () {
+      const address = instance.alloc(512);
+      address.should.be.above(0);
+    });
+    it('should exhaust the space in the instance', function () {
+      const address = instance.alloc(512);
+      address.should.equal(0);
     });
   });
 
@@ -68,8 +84,8 @@ describe('Allocator', function () {
       buffer = null;
       instance.buffer = null;
       instance = null;
-      if (typeof GC === 'function') {
-        GC();
+      if (typeof gc === 'function') {
+        gc();
       }
     });
 
@@ -115,11 +131,20 @@ function debugOnce (input) {
 
 function mutate (input: number[]) {
   //debugOnce([ 64, 72, 128, 96, 256, 128, 256]).forEach(sizes => {
-  permutations(input).forEach(sizes => {
 
+  permutations(input).forEach(sizes => {
     describe(`Sizes: ${sizes.join(', ')}`, function () {
+
       describe('Sequential', function () {
-        const instance = new Allocator(new Buffer(16000).fill(123));
+        let instance;
+        before(() => {
+          instance = new Allocator(new Buffer(16000).fill(123));
+        });
+        after(() => {
+          instance.buffer = null;
+          instance = null;
+        });
+
         let addresses;
         it('should allocate', function () {
           addresses = sizes.map(item => instance.alloc(item));
@@ -146,7 +171,15 @@ function mutate (input: number[]) {
       });
 
       describe('Alloc & Free', function () {
-        const instance = new Allocator(new Buffer(16000).fill(123));
+        let instance;
+        before(() => {
+          instance = new Allocator(new Buffer(16000).fill(123));
+        });
+        after(() => {
+          instance.buffer = null;
+          instance = null;
+        });
+
         let addresses;
         it('should allocate', function () {
           addresses = sizes.map(address => instance.alloc(address));
@@ -175,7 +208,15 @@ function mutate (input: number[]) {
       });
 
       describe('Alloc, Alloc, Free, Reverse, Alloc', function () {
-        const instance = new Allocator(new Buffer(16000).fill(123));
+        let instance;
+        before(() => {
+          instance = new Allocator(new Buffer(16000).fill(123));
+        });
+        after(() => {
+          instance.buffer = null;
+          instance = null;
+        });
+
         let addresses, extra;
         it('should allocate', function () {
           addresses = sizes.reduce((addresses, size) => {

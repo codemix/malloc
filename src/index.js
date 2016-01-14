@@ -1,5 +1,8 @@
+/* @flow */
+
 const POINTER_SIZE_IN_BYTES = 4;
 const MAX_HEIGHT = 32;
+
 
 const HEADER_SIZE_IN_QUADS = 1 + (MAX_HEIGHT * 2);
 const HEADER_OFFSET_IN_QUADS = 1;
@@ -14,28 +17,55 @@ const POINTER_OVERHEAD_IN_QUADS = 2;
 const MIN_FREEABLE_SIZE_IN_QUADS = 3;
 const FIRST_BLOCK_OFFSET_IN_QUADS = HEADER_OFFSET_IN_QUADS + HEADER_SIZE_IN_QUADS + POINTER_OVERHEAD_IN_QUADS;
 
-const UPDATES = (new Int32Array(MAX_HEIGHT)).fill(HEADER_OFFSET_IN_QUADS);
+const UPDATES: Int32Array = (new Int32Array(MAX_HEIGHT)).fill(HEADER_OFFSET_IN_QUADS);
 
 type ListNode = {
-  type: "free";
+  type: string;
   offset: int32;
   size: int32;
   height: int32;
   pointers: int32[];
 };
 
+type InspectionResult = {
+  header: ListNode;
+  blocks: Array<{
+    type: string;
+    size: int32;
+    node?: ListNode
+  }>;
+}
+
 export default class Allocator {
-  constructor (buffer: Buffer|ArrayBuffer, byteOffset: int32 = 0) {
+
+  buffer: ArrayBuffer;
+  byteOffset: uint32;
+  length: uint32;
+  int32Array: Int32Array;
+
+  constructor (buffer: Buffer|ArrayBuffer, byteOffset: uint32 = 0, byteLength: uint32 = 0) {
+    pre: {
+      if (buffer instanceof Buffer) {
+        byteLength <= buffer.length;
+      }
+      else {
+        byteLength <= buffer.byteLength;
+      }
+    }
     if (buffer instanceof Buffer) {
       this.buffer = buffer.buffer;
-      this.byteOffset = buffer.byteOffset;
-      this.length = buffer.length;
+      this.byteOffset = buffer.byteOffset + byteOffset;
+      this.length = byteLength === 0 ? buffer.length : byteLength;
     }
-    else {
+    else if (buffer instanceof ArrayBuffer) {
       this.buffer = buffer;
       this.byteOffset = byteOffset;
-      this.length = buffer.length - byteOffset;
+      this.length = byteLength === 0 ? buffer.byteLength - byteOffset : byteLength;
     }
+    else {
+      throw new TypeError(`Expected buffer to be an instance of Buffer or ArrayBuffer`);
+    }
+    assert: this.length >= 512;
     this.int32Array = prepare(new Int32Array(this.buffer, this.byteOffset, bytesToQuads(this.length)));
   }
 
@@ -89,7 +119,7 @@ export default class Allocator {
     }
     post: {
       it >= 0;
-      it < quadsToBytes(int32Array.length);
+      it < quadsToBytes(this.int32Array.length);
     }
 
 
@@ -123,7 +153,7 @@ export default class Allocator {
   /**
    * Inspect the instance.
    */
-  inspect () {
+  inspect (): InspectionResult {
     const int32Array: Int32Array = this.int32Array;
     const blocks: {type: string; size: int32; node?: ListNode}[] = [];
     const header: ListNode = readListNode(int32Array, HEADER_OFFSET_IN_QUADS);
@@ -134,6 +164,7 @@ export default class Allocator {
         throw new Error(`Got invalid sized chunk at ${quadsToBytes(block)} (${quadsToBytes(size)})`);
       }
       if (isFree(int32Array, block)) {
+        // @flowIssue todo
         blocks.push(readListNode(int32Array, block));
       }
       else {
@@ -242,7 +273,7 @@ function readSize (int32Array: Int32Array, block: int32): int32 {
   }
 
   const size: int32 = int32Array[block - 1];
-  return (size ^ (size >> 31)) - (size >> 31);
+  return Math.abs(size);
 }
 
 /**
@@ -265,14 +296,14 @@ function writeSize (int32Array: Int32Array, size: int32, block: int32): void {
   }
 
   int32Array[block - 1] = size;
-  int32Array[block + ((size ^ (size >> 31)) - (size >> 31))] = size;
+  int32Array[block + Math.abs(size)] = size;
 }
 
 /**
  * Populate the `UPDATES` array with the offset of the last item in each
  * list level, *before* a node of at least the given size.
  */
-function findPredecessors (int32Array: Int32Array, minimumSize: int32): int32 {
+function findPredecessors (int32Array: Int32Array, minimumSize: int32): void {
   pre: {
     minimumSize >= MIN_FREEABLE_SIZE_IN_QUADS, "Cannot handle blocks smaller than the minimum freeable size.";
     minimumSize < int32Array.length, "Cannot handle blocks larger than the capacity of the backing array.";
@@ -301,9 +332,9 @@ function findFreeBlock (int32Array: Int32Array, minimumSize: int32): int32 {
     minimumSize < int32Array.length;
   }
   post: {
-    it >= 0;
+    it >= HEADER_OFFSET_IN_QUADS;
     it < int32Array.length;
-    if (it !== 0) {
+    if (it !== HEADER_OFFSET_IN_QUADS) {
       readSize(int32Array, it) >= minimumSize;
     }
   }
@@ -384,7 +415,6 @@ function remove (int32Array: Int32Array, block: int32, blockSize: int32): void {
   post: {
     int32Array[block - 1] === -blockSize, "Block is marked as allocated.";
     int32Array[block + blockSize] === -blockSize, "Block is marked as allocated.";
-    !hasPointersTo(int32Array, block), UPDATES.map(quadsToBytes), "All traces of the node must be removed.";
   }
 
   trace: `Removing block ${quadsToBytes(block)} (${quadsToBytes(blockSize)} bytes).`;
@@ -446,17 +476,25 @@ function inspectList (int32Array: Int32Array): ListNode[] {
  * Iterate all of the free blocks in the list, looking for pointers to the given block.
  */
 function hasPointersTo (int32Array: Int32Array, block: int32): boolean {
-  let next: int32 = FIRST_BLOCK_OFFSET_IN_QUADS;
+  let next = FIRST_BLOCK_OFFSET_IN_QUADS;
+  let jumps = 0;
   while (next < int32Array.length - POINTER_SIZE_IN_QUADS) {
-    if (isFree(int32Array, next)) {
+    jumps++;
+    if (jumps >= (int32Array.length - FIRST_BLOCK_OFFSET_IN_QUADS) / (MIN_FREEABLE_SIZE_IN_QUADS + POINTER_SIZE_IN_QUADS)) {
+      throw new Error(`Max iterations ${next} ${int32Array.length}`);
+    }
+    if (int32Array[next - 1] >= MIN_FREEABLE_SIZE_IN_QUADS) {
       for (let height = int32Array[next + HEIGHT_OFFSET_IN_QUADS] - 1; height >= 0; height--) {
-        const pointer: int32 = int32Array[next + NEXT_OFFSET_IN_QUADS + height];
-        if (pointer === block) {
+        assert: {
+          height >= 0;
+          height <= MAX_HEIGHT;
+        }
+        if (int32Array[next + NEXT_OFFSET_IN_QUADS + height] === block) {
           return true;
         }
       }
     }
-    next += readSize(int32Array, next) + POINTER_OVERHEAD_IN_QUADS;
+    next += Math.abs(int32Array[next - 1]) + POINTER_OVERHEAD_IN_QUADS;
   }
   return false;
 }
