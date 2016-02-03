@@ -2,7 +2,7 @@
   "name": "malloc",
   "version": "1.0.0",
   "description": "Simple malloc() & free() implementation on top of buffers.",
-  "main": "index.js",
+  "main": "lib/index.js",
   "directories": {
     "test": "test"
   },
@@ -10,22 +10,25 @@
     "babel-plugin-contracts": "^1.0.0"
   },
   "devDependencies": {
-    "babel-cli": "^6.2.0",
-    "babel-core": "^6.2.0",
-    "babel-plugin-typecheck": "^3.4.0",
+    "babel-cli": "^6.4.0",
+    "babel-core": "^6.4.0",
+    "babel-plugin-typecheck": "^3.6.1",
     "babel-preset-es2015": "^6.3.13",
-    "babel-preset-es2015-node5": "^1.1.1",
-    "babel-preset-react": "^6.1.18",
-    "babel-preset-stage-1": "^6.1.18",
+    "babel-preset-react": "^6.3.13",
+    "babel-preset-stage-0": "^6.3.13",
+    "isparta": "^4.0.0",
     "mocha": "^2.3.3",
     "random-js": "^1.0.8",
     "should": "^7.1.1"
   },
   "scripts": {
-    "test": "mocha",
-    "watch": "mocha --watch",
+    "prepublish": "NODE_ENV=production npm run build && npm run test",
+    "test": "flow && mocha --max-old-space-size=8192 --expose-gc",
+    "watch": "mocha --watch --max-old-space-size=8192 --expose-gc",
     "build": "babel -d ./lib ./src",
-    "perf": "rm *.cfg; NODE_ENV=production npm run build && node --max-inlined-source-size=2000 --print-opt-code --trace-hydrogen --trace-phase=Z --trace-deopt --code-comments --hydrogen-track-positions --redirect-code-traces --redirect-code-traces-to=code.asm ./perf.js"
+    "perf": "rm *.cfg; NODE_ENV=production npm run build && node --max-inlined-source-size=2000 --print-opt-code --trace-hydrogen --trace-phase=Z --trace-deopt --code-comments --hydrogen-track-positions --redirect-code-traces --redirect-code-traces-to=code.asm ./perf.js",
+    "coverage": "NODE_ENV=coverage babel-node node_modules/isparta/bin/isparta cover --report text --report html node_modules/mocha/bin/_mocha -- --reporter dot",
+    "flow": "flow"
   },
   "repository": {
     "type": "git",

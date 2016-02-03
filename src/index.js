@@ -17,6 +17,10 @@ const POINTER_OVERHEAD_IN_QUADS = 2;
 const MIN_FREEABLE_SIZE_IN_QUADS = 3;
 const FIRST_BLOCK_OFFSET_IN_QUADS = HEADER_OFFSET_IN_QUADS + HEADER_SIZE_IN_QUADS + POINTER_OVERHEAD_IN_QUADS;
 
+const MIN_FREEABLE_SIZE_IN_BYTES = MIN_FREEABLE_SIZE_IN_QUADS * POINTER_SIZE_IN_BYTES;
+const FIRST_BLOCK_OFFSET_IN_BYTES = FIRST_BLOCK_OFFSET_IN_QUADS * POINTER_SIZE_IN_BYTES;
+const OVERHEAD_IN_BYTES = (FIRST_BLOCK_OFFSET_IN_QUADS + 1) * POINTER_SIZE_IN_BYTES;
+
 const UPDATES: Int32Array = (new Int32Array(MAX_HEIGHT)).fill(HEADER_OFFSET_IN_QUADS);
 
 type ListNode = {
@@ -48,7 +52,7 @@ export default class Allocator {
       if (buffer instanceof Buffer) {
         byteLength <= buffer.length;
       }
-      else {
+      else if (buffer instanceof ArrayBuffer) {
         byteLength <= buffer.byteLength;
       }
     }
@@ -65,7 +69,7 @@ export default class Allocator {
     else {
       throw new TypeError(`Expected buffer to be an instance of Buffer or ArrayBuffer`);
     }
-    assert: this.length >= 512;
+    assert: this.length >= OVERHEAD_IN_BYTES;
     this.int32Array = prepare(new Int32Array(this.buffer, this.byteOffset, bytesToQuads(this.length)));
   }
 
@@ -75,13 +79,17 @@ export default class Allocator {
    * If allocation fails, returns 0.
    */
   alloc (numberOfBytes: int32): int32 {
-    pre: {
-      numberOfBytes >= POINTER_SIZE_IN_BYTES;
-      numberOfBytes < this.length;
-      numberOfBytes / POINTER_SIZE_IN_BYTES === Math.floor(numberOfBytes / POINTER_SIZE_IN_BYTES), "Allocation size must be a multiple of the pointer size.";
-    }
+
     post: {
       it === 0 || it >= quadsToBytes(FIRST_BLOCK_OFFSET_IN_QUADS);
+    }
+
+    if (numberOfBytes < MIN_FREEABLE_SIZE_IN_BYTES || numberOfBytes > this.length || typeof numberOfBytes !== 'number' || isNaN(numberOfBytes)) {
+      throw new RangeError(`Allocation size must be between ${MIN_FREEABLE_SIZE_IN_BYTES} bytes and ${this.length - OVERHEAD_IN_BYTES} bytes`);
+    }
+
+    if (numberOfBytes / POINTER_SIZE_IN_BYTES !== Math.floor(numberOfBytes / POINTER_SIZE_IN_BYTES)) {
+      throw new RangeError(`Allocation size must be a multiple of the pointer size (${POINTER_SIZE_IN_BYTES}).`);
     }
 
     trace: `Allocating ${numberOfBytes} bytes.`;
@@ -113,24 +121,37 @@ export default class Allocator {
    * Free a number of bytes from the given address.
    */
   free (address: int32): int32 {
-    pre: {
-      address / POINTER_SIZE_IN_BYTES === Math.floor(address / POINTER_SIZE_IN_BYTES), "Block address must be a multiple of the pointer size.";
-      address >= quadsToBytes(FIRST_BLOCK_OFFSET_IN_QUADS);
-    }
+
     post: {
       it >= 0;
       it < quadsToBytes(this.int32Array.length);
     }
 
 
+    if (address < FIRST_BLOCK_OFFSET_IN_BYTES || address > this.length || typeof address !== 'number' || isNaN(address)) {
+      throw new RangeError(`Address must be between ${FIRST_BLOCK_OFFSET_IN_BYTES} and ${this.length - OVERHEAD_IN_BYTES}`);
+    }
+
+    if (address / POINTER_SIZE_IN_BYTES !== Math.floor(address / POINTER_SIZE_IN_BYTES)) {
+      throw new RangeError(`Address must be a multiple of the pointer size (${POINTER_SIZE_IN_BYTES}).`);
+    }
+
+
     const int32Array: Int32Array = this.int32Array;
     const block = bytesToQuads(address);
 
-    trace: `Freeing ${quadsToBytes(readSize(int32Array, block))} bytes from block ${address}.`;
-
     if (block < FIRST_BLOCK_OFFSET_IN_QUADS) {
-      return 0;
+      throw new RangeError(`Invalid block address: ${block}`);
     }
+
+    const blockSize: uint32 = readSize(int32Array, block);
+
+    trace: `Freeing ${quadsToBytes(blockSize)} bytes from block ${address}.`;
+
+    if (blockSize < MIN_FREEABLE_SIZE_IN_QUADS || blockSize > (this.length - OVERHEAD_IN_BYTES) / 4) {
+      throw new RangeError(`Invalid block: ${block}, got block size: ${quadsToBytes(blockSize)}`);
+    }
+
 
     const preceding: int32 = getFreeBlockBefore(int32Array, block);
     const trailing: int32 = getFreeBlockAfter(int32Array, block);
@@ -151,32 +172,25 @@ export default class Allocator {
   }
 
   /**
+   * Return the size of the block at the given address.
+   */
+  sizeOf (address: int32): uint32 {
+    if (address < FIRST_BLOCK_OFFSET_IN_BYTES || address > this.length || typeof address !== 'number' || isNaN(address)) {
+      throw new RangeError(`Address must be between ${FIRST_BLOCK_OFFSET_IN_BYTES} and ${this.length - OVERHEAD_IN_BYTES}`);
+    }
+
+    if (address / POINTER_SIZE_IN_BYTES !== Math.floor(address / POINTER_SIZE_IN_BYTES)) {
+      throw new RangeError(`Address must be a multiple of the pointer size (${POINTER_SIZE_IN_BYTES}).`);
+    }
+
+    return quadsToBytes(readSize(this.int32Array, bytesToQuads(address)));
+  }
+
+  /**
    * Inspect the instance.
    */
   inspect (): InspectionResult {
-    const int32Array: Int32Array = this.int32Array;
-    const blocks: {type: string; size: int32; node?: ListNode}[] = [];
-    const header: ListNode = readListNode(int32Array, HEADER_OFFSET_IN_QUADS);
-    let block: int32 = FIRST_BLOCK_OFFSET_IN_QUADS;
-    while (block < int32Array.length - POINTER_SIZE_IN_QUADS) {
-      const size: int32 = readSize(int32Array, block);
-      if (size < POINTER_OVERHEAD_IN_QUADS || size >= this.length) {
-        throw new Error(`Got invalid sized chunk at ${quadsToBytes(block)} (${quadsToBytes(size)})`);
-      }
-      if (isFree(int32Array, block)) {
-        // @flowIssue todo
-        blocks.push(readListNode(int32Array, block));
-      }
-      else {
-        blocks.push({
-          type: 'used',
-          offset: quadsToBytes(block),
-          size: quadsToBytes(size)
-        });
-      }
-      block += size + POINTER_OVERHEAD_IN_QUADS;
-    }
-    return {header, blocks};
+    return inspect(this.int32Array);
   }
 }
 
@@ -199,6 +213,35 @@ export function verifyHeader (int32Array: Int32Array): boolean {
 }
 
 /**
+ * Inspect the freelist in the given array.
+ */
+export function inspect (int32Array: Int32Array): InspectionResult {
+  const blocks: {type: string; size: int32; node?: ListNode}[] = [];
+  const header: ListNode = readListNode(int32Array, HEADER_OFFSET_IN_QUADS);
+  let block: int32 = FIRST_BLOCK_OFFSET_IN_QUADS;
+  while (block < int32Array.length - POINTER_SIZE_IN_QUADS) {
+    const size: int32 = readSize(int32Array, block);
+    /* istanbul ignore if  */
+    if (size < POINTER_OVERHEAD_IN_QUADS || size >= int32Array.length) {
+      throw new Error(`Got invalid sized chunk at ${quadsToBytes(block)} (${quadsToBytes(size)})`);
+    }
+    if (isFree(int32Array, block)) {
+      // @flowIssue todo
+      blocks.push(readListNode(int32Array, block));
+    }
+    else {
+      blocks.push({
+        type: 'used',
+        offset: quadsToBytes(block),
+        size: quadsToBytes(size)
+      });
+    }
+    block += size + POINTER_OVERHEAD_IN_QUADS;
+  }
+  return {header, blocks};
+}
+
+/**
  * Write the initial header for an empty int32Array.
  */
 function writeInitialHeader (int32Array: Int32Array) {
@@ -208,14 +251,14 @@ function writeInitialHeader (int32Array: Int32Array) {
   const block = FIRST_BLOCK_OFFSET_IN_QUADS;
   const blockSize = int32Array.length - (header + headerSize + POINTER_OVERHEAD_IN_QUADS + POINTER_SIZE_IN_QUADS);
 
-  writeSize(int32Array, headerSize, header);
+  writeFreeBlockSize(int32Array, headerSize, header);
   int32Array[header + HEIGHT_OFFSET_IN_QUADS] = 1;
   int32Array[header + NEXT_OFFSET_IN_QUADS] = block;
   for (let height = 1; height < MAX_HEIGHT; height++) {
     int32Array[header + NEXT_OFFSET_IN_QUADS + height] = HEADER_OFFSET_IN_QUADS;
   }
 
-  writeSize(int32Array, blockSize, block);
+  writeFreeBlockSize(int32Array, blockSize, block);
   int32Array[block + HEIGHT_OFFSET_IN_QUADS] = 1;
   int32Array[block + NEXT_OFFSET_IN_QUADS] = header;
 }
@@ -278,25 +321,20 @@ function readSize (int32Array: Int32Array, block: int32): int32 {
 
 /**
  * Write the size of the block at the given address.
+ * Note: This ONLY works for free blocks, not blocks in use.
  */
-function writeSize (int32Array: Int32Array, size: int32, block: int32): void {
+function writeFreeBlockSize (int32Array: Int32Array, size: int32, block: int32): void {
   pre: {
     block >= 1;
     size !== 0;
-    if (size > 0) {
-      size < int32Array.length;
-    }
-    else {
-      -size < int32Array.length;
-    }
   }
   post: {
     int32Array[block - 1] === size;
-    int32Array[block + Math.abs(size)] === size;
+    int32Array[block + size] === size;
   }
 
   int32Array[block - 1] = size;
-  int32Array[block + Math.abs(size)] = size;
+  int32Array[block + size] = size;
 }
 
 /**
@@ -315,7 +353,7 @@ function findPredecessors (int32Array: Int32Array, minimumSize: int32): void {
 
   for (let height = listHeight - 1; height >= 0; --height) {
     let next: int32 = node + NEXT_OFFSET_IN_QUADS + height;
-    while (int32Array[next] !== HEADER_OFFSET_IN_QUADS && int32Array[int32Array[next] - 1] < minimumSize) {
+    while (int32Array[next] >= FIRST_BLOCK_OFFSET_IN_QUADS && int32Array[int32Array[next] - 1] < minimumSize) {
       node = int32Array[next];
       next = node + NEXT_OFFSET_IN_QUADS + height;
     }
@@ -433,7 +471,7 @@ function remove (int32Array: Int32Array, block: int32, blockSize: int32): void {
     node = int32Array[node + NEXT_OFFSET_IN_QUADS];
   }
 
-
+  /* istanbul ignore if  */
   if (node !== block) {
     throw new Error(`Could not find block to remove.`);
   }
@@ -459,48 +497,6 @@ function remove (int32Array: Int32Array, block: int32, blockSize: int32): void {
 }
 
 /**
- * Inspect the free list.
- */
-function inspectList (int32Array: Int32Array): ListNode[] {
-  const nodes: ListNode[] = [];
-  let next: int32 = int32Array[HEADER_OFFSET_IN_QUADS + NEXT_OFFSET_IN_QUADS];
-
-  while (next > 0 && next !== HEADER_OFFSET_IN_QUADS) {
-    nodes.push(readListNode(int32Array, next));
-    next = int32Array[next + NEXT_OFFSET_IN_QUADS];
-  }
-  return nodes;
-}
-
-/**
- * Iterate all of the free blocks in the list, looking for pointers to the given block.
- */
-function hasPointersTo (int32Array: Int32Array, block: int32): boolean {
-  let next = FIRST_BLOCK_OFFSET_IN_QUADS;
-  let jumps = 0;
-  while (next < int32Array.length - POINTER_SIZE_IN_QUADS) {
-    jumps++;
-    if (jumps >= (int32Array.length - FIRST_BLOCK_OFFSET_IN_QUADS) / (MIN_FREEABLE_SIZE_IN_QUADS + POINTER_SIZE_IN_QUADS)) {
-      throw new Error(`Max iterations ${next} ${int32Array.length}`);
-    }
-    if (int32Array[next - 1] >= MIN_FREEABLE_SIZE_IN_QUADS) {
-      for (let height = int32Array[next + HEIGHT_OFFSET_IN_QUADS] - 1; height >= 0; height--) {
-        assert: {
-          height >= 0;
-          height <= MAX_HEIGHT;
-        }
-        if (int32Array[next + NEXT_OFFSET_IN_QUADS + height] === block) {
-          return true;
-        }
-      }
-    }
-    next += Math.abs(int32Array[next - 1]) + POINTER_OVERHEAD_IN_QUADS;
-  }
-  return false;
-}
-
-
-/**
  * Determine whether the block at the given address is free or not.
  */
 function isFree (int32Array: Int32Array, block: int32): boolean {
@@ -508,9 +504,11 @@ function isFree (int32Array: Int32Array, block: int32): boolean {
     block < int32Array.length;
   }
 
+  /* istanbul ignore if  */
   if (block < HEADER_SIZE_IN_QUADS) {
     return false;
   }
+
   const size: int32 = int32Array[block - POINTER_SIZE_IN_QUADS];
 
   assert: {

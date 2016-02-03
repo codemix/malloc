@@ -1,4 +1,4 @@
---reporter=spec
+--reporter=dot
 --require should
 --require babel-polyfill
 --require ./test-polyfill.js

@@ -9,13 +9,39 @@ ensureDeterministicRandom();
 describe('Allocator', function () {
 
   describe('constructor()', function () {
-    let instance;
-    it('should create a new instance', function () {
-      instance = new Allocator(new Buffer(1024).fill(123));
+    describe('Buffer', function () {
+      let instance;
+
+      it('should create a new instance', function () {
+        instance = new Allocator(new Buffer(1024).fill(123));
+      });
+
+      it('should prepare the header', function () {
+        verifyHeader(instance.int32Array).should.equal(true);
+      });
     });
 
-    it('should prepare the header', function () {
-      verifyHeader(instance.int32Array).should.equal(true);
+    describe('ArrayBuffer', function () {
+      let instance;
+
+      it('should create a new instance', function () {
+        instance = new Allocator(new ArrayBuffer(1024));
+      });
+
+      it('should prepare the header', function () {
+        verifyHeader(instance.int32Array).should.equal(true);
+      });
+
+    });
+
+    describe('Bad Constructor', function () {
+      it('should not accept undefined', function () {
+        (() => new Allocator()).should.throw(TypeError);
+      });
+
+      it('should not accept an array', function () {
+        (() => new Allocator([1,2,3])).should.throw(TypeError);
+      });
     });
   });
 
@@ -59,6 +85,41 @@ describe('Allocator', function () {
     });
   });
 
+  describe('bad alloc() and free()', function () {
+    let instance = new Allocator(new Buffer(4096).fill(127));
+    it('should fail to allocate less than the minimum freeable size', function () {
+      (() => instance.alloc(8)).should.throw(RangeError);
+    });
+
+    it('should fail to allocate more than the capacity', function () {
+      (() => instance.alloc(4096 * 2)).should.throw(RangeError);
+    });
+
+    it('should fail to allocate an unaligned size', function () {
+      (() => instance.alloc(33)).should.throw(RangeError);
+    });
+
+    it('should fail to allocate a non integral number of bytes', function () {
+      (() => instance.alloc(40.33)).should.throw(Error);
+    });
+
+    it('should not free an invalid address', function () {
+      (() => instance.free(-1)).should.throw(RangeError);
+    });
+
+    it('should not free an address within the header', function () {
+      (() => instance.free(16)).should.throw(RangeError);
+    });
+
+    it('should not free an address larger than the array', function () {
+      (() => instance.free(4096 * 2)).should.throw(RangeError);
+    });
+
+    it('should not free an unallocated address', function () {
+      (() => instance.free(1024)).should.throw(Error);
+    });
+  });
+
   if (!process.env.MALLOC_FAST_TESTS) {
     // Warning: Increasing the number of mutations has an exponential effect on test time.
     mutate([
@@ -72,7 +133,7 @@ describe('Allocator', function () {
     ]);
   }
 
-  describe('Benchmarks', function () {
+  (process.env.NODE_ENV === "coverage" ? describe.skip : describe)('Benchmarks', function () {
     let buffer = new Buffer(1024 * 1024 * 20);
     let instance;
     beforeEach(() => {
