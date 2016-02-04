@@ -1,6 +1,7 @@
 # malloc
-
 A skip-list based memory allocator built on top of typed arrays (and node buffers).
+
+[![Build Status](https://travis-ci.org/codemix/malloc.svg?branch=master)](https://travis-ci.org/codemix/malloc)
 
 ## What?
 
