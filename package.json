@@ -1,18 +1,20 @@
 {
   "name": "malloc",
   "version": "1.0.0",
-  "description": "Simple malloc() & free() implementation on top of buffers.",
-  "main": "lib/index.js",
+  "description": "Simple malloc() & free() implementation on top of buffers and array buffers.",
+  "main": "index.js",
   "directories": {
     "test": "test"
   },
   "dependencies": {
-    "babel-plugin-contracts": "^1.0.0"
+
   },
   "devDependencies": {
     "babel-cli": "^6.4.0",
     "babel-core": "^6.4.0",
+    "babel-plugin-trace": "^1.0.0",
     "babel-plugin-typecheck": "^3.6.1",
+    "babel-plugin-contracts": "^1.0.0",
     "babel-preset-es2015": "^6.3.13",
     "babel-preset-react": "^6.3.13",
     "babel-preset-stage-0": "^6.3.13",
@@ -22,7 +24,7 @@
     "should": "^7.1.1"
   },
   "scripts": {
-    "prepublish": "NODE_ENV=production npm run build && npm run test",
+    "prepublish": "NODE_ENV=production npm run build",
     "test": "flow && mocha --max-old-space-size=8192 --expose-gc",
     "watch": "mocha --watch --max-old-space-size=8192 --expose-gc",
     "build": "babel -d ./lib ./src",

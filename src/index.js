@@ -38,7 +38,7 @@ type InspectionResult = {
     size: int32;
     node?: ListNode
   }>;
-}
+};
 
 export default class Allocator {
 
