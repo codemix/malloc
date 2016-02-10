@@ -17,9 +17,12 @@ const POINTER_OVERHEAD_IN_QUADS = 2;
 const MIN_FREEABLE_SIZE_IN_QUADS = 3;
 const FIRST_BLOCK_OFFSET_IN_QUADS = HEADER_OFFSET_IN_QUADS + HEADER_SIZE_IN_QUADS + POINTER_OVERHEAD_IN_QUADS;
 
-const MIN_FREEABLE_SIZE_IN_BYTES = MIN_FREEABLE_SIZE_IN_QUADS * POINTER_SIZE_IN_BYTES;
+const MIN_FREEABLE_SIZE_IN_BYTES = 16;
 const FIRST_BLOCK_OFFSET_IN_BYTES = FIRST_BLOCK_OFFSET_IN_QUADS * POINTER_SIZE_IN_BYTES;
 const OVERHEAD_IN_BYTES = (FIRST_BLOCK_OFFSET_IN_QUADS + 1) * POINTER_SIZE_IN_BYTES;
+
+const ALIGNMENT_IN_BYTES = 8;
+const ALIGNMENT_MASK = ALIGNMENT_IN_BYTES - 1;
 
 const UPDATES: Int32Array = (new Int32Array(MAX_HEIGHT)).fill(HEADER_OFFSET_IN_QUADS);
 
@@ -44,9 +47,12 @@ export default class Allocator {
 
   buffer: ArrayBuffer;
   byteOffset: uint32;
-  length: uint32;
+  byteLength: uint32;
   int32Array: Int32Array;
 
+  /**
+   * Initialize the allocator from the given Buffer or ArrayBuffer.
+   */
   constructor (buffer: Buffer|ArrayBuffer, byteOffset: uint32 = 0, byteLength: uint32 = 0) {
     pre: {
       if (buffer instanceof Buffer) {
@@ -59,21 +65,20 @@ export default class Allocator {
     if (buffer instanceof Buffer) {
       this.buffer = buffer.buffer;
       this.byteOffset = buffer.byteOffset + byteOffset;
-      this.length = byteLength === 0 ? buffer.length : byteLength;
+      this.byteLength = byteLength === 0 ? buffer.length : byteLength;
     }
     else if (buffer instanceof ArrayBuffer) {
       this.buffer = buffer;
       this.byteOffset = byteOffset;
-      this.length = byteLength === 0 ? buffer.byteLength - byteOffset : byteLength;
+      this.byteLength = byteLength === 0 ? buffer.byteLength - byteOffset : byteLength;
     }
     else {
       throw new TypeError(`Expected buffer to be an instance of Buffer or ArrayBuffer`);
     }
-    assert: this.length >= OVERHEAD_IN_BYTES;
-    this.int32Array = prepare(new Int32Array(this.buffer, this.byteOffset, bytesToQuads(this.length)));
+    assert: this.byteLength >= OVERHEAD_IN_BYTES;
+    this.int32Array = prepare(new Int32Array(this.buffer, this.byteOffset, bytesToQuads(this.byteLength)));
     checkListIntegrity(this.int32Array);
   }
-
 
   /**
    * Allocate a given number of bytes and return the offset.
@@ -88,12 +93,13 @@ export default class Allocator {
       checkListIntegrity(this.int32Array);
     }
 
-    if (numberOfBytes < MIN_FREEABLE_SIZE_IN_BYTES || numberOfBytes > this.length || typeof numberOfBytes !== 'number' || isNaN(numberOfBytes)) {
-      throw new RangeError(`Allocation size must be between ${MIN_FREEABLE_SIZE_IN_BYTES} bytes and ${this.length - OVERHEAD_IN_BYTES} bytes`);
-    }
+    numberOfBytes = align(numberOfBytes);
 
-    if (numberOfBytes / POINTER_SIZE_IN_BYTES !== Math.floor(numberOfBytes / POINTER_SIZE_IN_BYTES)) {
-      throw new RangeError(`Allocation size must be a multiple of the pointer size (${POINTER_SIZE_IN_BYTES}).`);
+    if (numberOfBytes < MIN_FREEABLE_SIZE_IN_BYTES) {
+      numberOfBytes = MIN_FREEABLE_SIZE_IN_BYTES;
+    }
+    else if (numberOfBytes > this.byteLength) {
+      throw new RangeError(`Allocation size must be between ${MIN_FREEABLE_SIZE_IN_BYTES} bytes and ${this.byteLength - OVERHEAD_IN_BYTES} bytes`);
     }
 
     trace: `Allocating ${numberOfBytes} bytes.`;
@@ -108,7 +114,7 @@ export default class Allocator {
 
     assert: {
       blockSize >= POINTER_SIZE_IN_QUADS;
-      blockSize < this.length;
+      blockSize < this.byteLength;
     }
 
     if (blockSize - (minimumSize + POINTER_OVERHEAD_IN_QUADS) >= MIN_FREEABLE_SIZE_IN_QUADS) {
@@ -119,6 +125,37 @@ export default class Allocator {
     }
 
     return quadsToBytes(block);
+  }
+
+  /**
+   * Allocate and clear the given number of bytes and return the offset.
+   * If allocation fails, returns 0.
+   */
+  calloc (numberOfBytes: int32): int32 {
+    post: {
+      it === 0 || it >= quadsToBytes(FIRST_BLOCK_OFFSET_IN_QUADS);
+      checkListIntegrity(this.int32Array);
+    }
+
+    if (numberOfBytes < MIN_FREEABLE_SIZE_IN_BYTES) {
+      numberOfBytes = MIN_FREEABLE_SIZE_IN_BYTES;
+    }
+    else {
+      numberOfBytes = align(numberOfBytes);
+    }
+
+    const address = this.alloc(numberOfBytes);
+    if (address === 0) {
+      // Not enough space
+      return 0;
+    }
+    const int32Array = this.int32Array;
+    const offset = bytesToQuads(address);
+    const limit = numberOfBytes / 4;
+    for (let i = 0; i < limit; i++) {
+      int32Array[offset + i] = 0;
+    }
+    return address;
   }
 
   /**
@@ -134,15 +171,13 @@ export default class Allocator {
       checkListIntegrity(this.int32Array);
     }
 
-
-    if (address < FIRST_BLOCK_OFFSET_IN_BYTES || address > this.length || typeof address !== 'number' || isNaN(address)) {
-      throw new RangeError(`Address must be between ${FIRST_BLOCK_OFFSET_IN_BYTES} and ${this.length - OVERHEAD_IN_BYTES}`);
+    if ((address & ALIGNMENT_MASK) !== 0) {
+      throw new RangeError(`Address must be a multiple of (${ALIGNMENT_IN_BYTES}).`);
     }
 
-    if (address / POINTER_SIZE_IN_BYTES !== Math.floor(address / POINTER_SIZE_IN_BYTES)) {
-      throw new RangeError(`Address must be a multiple of the pointer size (${POINTER_SIZE_IN_BYTES}).`);
+    if (address < FIRST_BLOCK_OFFSET_IN_BYTES || address > this.byteLength) {
+      throw new RangeError(`Address must be between ${FIRST_BLOCK_OFFSET_IN_BYTES} and ${this.byteLength - OVERHEAD_IN_BYTES}`);
     }
-
 
     const int32Array: Int32Array = this.int32Array;
     const block = bytesToQuads(address);
@@ -152,7 +187,7 @@ export default class Allocator {
     trace: `Freeing ${quadsToBytes(blockSize)} bytes from block ${address}.`;
 
     /* istanbul ignore if  */
-    if (blockSize < MIN_FREEABLE_SIZE_IN_QUADS || blockSize > (this.length - OVERHEAD_IN_BYTES) / 4) {
+    if (blockSize < MIN_FREEABLE_SIZE_IN_QUADS || blockSize > (this.byteLength - OVERHEAD_IN_BYTES) / 4) {
       throw new RangeError(`Invalid block: ${block}, got block size: ${quadsToBytes(blockSize)}`);
     }
 
@@ -178,11 +213,11 @@ export default class Allocator {
    * Return the size of the block at the given address.
    */
   sizeOf (address: int32): uint32 {
-    if (address < FIRST_BLOCK_OFFSET_IN_BYTES || address > this.length || typeof address !== 'number' || isNaN(address)) {
-      throw new RangeError(`Address must be between ${FIRST_BLOCK_OFFSET_IN_BYTES} and ${this.length - OVERHEAD_IN_BYTES}`);
+    if (address < FIRST_BLOCK_OFFSET_IN_BYTES || address > this.byteLength || typeof address !== 'number' || isNaN(address)) {
+      throw new RangeError(`Address must be between ${FIRST_BLOCK_OFFSET_IN_BYTES} and ${this.byteLength - OVERHEAD_IN_BYTES}`);
     }
 
-    if (address / POINTER_SIZE_IN_BYTES !== Math.floor(address / POINTER_SIZE_IN_BYTES)) {
+    if ((address & ALIGNMENT_MASK) !== 0) {
       throw new RangeError(`Address must be a multiple of the pointer size (${POINTER_SIZE_IN_BYTES}).`);
     }
 
@@ -331,6 +366,13 @@ function quadsToBytes (num: int32): int32 {
  */
 function bytesToQuads (num: int32): int32 {
   return Math.ceil(num / POINTER_SIZE_IN_BYTES);
+}
+
+/**
+ * Align the given value to 8 bytes.
+ */
+function align (value: int32): int32 {
+  return (value + ALIGNMENT_MASK) & ~ALIGNMENT_MASK;
 }
 
 /**
@@ -563,8 +605,8 @@ function hasPointersTo (int32Array: Int32Array, block: int32): boolean {
     if (isFree(int32Array, next)) {
       for (let height = int32Array[next + HEIGHT_OFFSET_IN_QUADS] - 1; height >= 0; height--) {
         const pointer: int32 = int32Array[next + NEXT_OFFSET_IN_QUADS + height];
+        /* istanbul ignore if  */
         if (pointer === block) {
-          /* istanbul ignore if  */
           return true;
         }
       }
