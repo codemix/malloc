@@ -18,5 +18,6 @@
         }
       }
     }],
-    ["trace", {strip: true}]]
+    ["trace", {strip: true}]
+  ]
 }

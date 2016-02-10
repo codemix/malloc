@@ -71,6 +71,7 @@ export default class Allocator {
     }
     assert: this.length >= OVERHEAD_IN_BYTES;
     this.int32Array = prepare(new Int32Array(this.buffer, this.byteOffset, bytesToQuads(this.length)));
+    checkListIntegrity(this.int32Array);
   }
 
 
@@ -80,8 +81,11 @@ export default class Allocator {
    */
   alloc (numberOfBytes: int32): int32 {
 
+    pre: checkListIntegrity(this.int32Array);
+
     post: {
       it === 0 || it >= quadsToBytes(FIRST_BLOCK_OFFSET_IN_QUADS);
+      checkListIntegrity(this.int32Array);
     }
 
     if (numberOfBytes < MIN_FREEABLE_SIZE_IN_BYTES || numberOfBytes > this.length || typeof numberOfBytes !== 'number' || isNaN(numberOfBytes)) {
@@ -122,9 +126,12 @@ export default class Allocator {
    */
   free (address: int32): int32 {
 
+    pre: checkListIntegrity(this.int32Array);
+
     post: {
       it >= 0;
       it < quadsToBytes(this.int32Array.length);
+      checkListIntegrity(this.int32Array);
     }
 
 
@@ -140,34 +147,30 @@ export default class Allocator {
     const int32Array: Int32Array = this.int32Array;
     const block = bytesToQuads(address);
 
-    if (block < FIRST_BLOCK_OFFSET_IN_QUADS) {
-      throw new RangeError(`Invalid block address: ${block}`);
-    }
-
     const blockSize: uint32 = readSize(int32Array, block);
 
     trace: `Freeing ${quadsToBytes(blockSize)} bytes from block ${address}.`;
 
+    /* istanbul ignore if  */
     if (blockSize < MIN_FREEABLE_SIZE_IN_QUADS || blockSize > (this.length - OVERHEAD_IN_BYTES) / 4) {
       throw new RangeError(`Invalid block: ${block}, got block size: ${quadsToBytes(blockSize)}`);
     }
-
 
     const preceding: int32 = getFreeBlockBefore(int32Array, block);
     const trailing: int32 = getFreeBlockAfter(int32Array, block);
     if (preceding !== 0) {
       if (trailing !== 0) {
-        return quadsToBytes(insertMiddle(int32Array, preceding, block, trailing));
+        return quadsToBytes(insertMiddle(int32Array, preceding, block, blockSize, trailing));
       }
       else {
-        return quadsToBytes(insertAfter(int32Array, preceding, block));
+        return quadsToBytes(insertAfter(int32Array, preceding, block, blockSize));
       }
     }
     else if (trailing !== 0) {
-      return quadsToBytes(insertBefore(int32Array, trailing, block));
+      return quadsToBytes(insertBefore(int32Array, trailing, block, blockSize));
     }
     else {
-      return quadsToBytes(insert(int32Array, block, readSize(int32Array, block)));
+      return quadsToBytes(insert(int32Array, block, blockSize));
     }
   }
 
@@ -213,6 +216,81 @@ export function verifyHeader (int32Array: Int32Array): boolean {
 }
 
 /**
+ * Write the initial header for an empty int32Array.
+ */
+function writeInitialHeader (int32Array: Int32Array) {
+  trace: `Writing initial header.`;
+  const header = HEADER_OFFSET_IN_QUADS;
+  const headerSize = HEADER_SIZE_IN_QUADS;
+  const block = FIRST_BLOCK_OFFSET_IN_QUADS;
+  const blockSize = int32Array.length - (header + headerSize + POINTER_OVERHEAD_IN_QUADS + POINTER_SIZE_IN_QUADS);
+
+  writeFreeBlockSize(int32Array, headerSize, header);
+  int32Array[header + HEIGHT_OFFSET_IN_QUADS] = 1;
+  int32Array[header + NEXT_OFFSET_IN_QUADS] = block;
+  for (let height = 1; height < MAX_HEIGHT; height++) {
+    int32Array[header + NEXT_OFFSET_IN_QUADS + height] = HEADER_OFFSET_IN_QUADS;
+  }
+
+  writeFreeBlockSize(int32Array, blockSize, block);
+  int32Array[block + HEIGHT_OFFSET_IN_QUADS] = 1;
+  int32Array[block + NEXT_OFFSET_IN_QUADS] = header;
+}
+
+/**
+ * Check the integrity of the freelist in the given array.
+ */
+export function checkListIntegrity (int32Array: Int32Array): boolean {
+  let block: int32 = FIRST_BLOCK_OFFSET_IN_QUADS;
+  while (block < int32Array.length - POINTER_SIZE_IN_QUADS) {
+    const size: int32 = readSize(int32Array, block);
+    /* istanbul ignore if  */
+    if (size < POINTER_OVERHEAD_IN_QUADS || size >= int32Array.length - FIRST_BLOCK_OFFSET_IN_QUADS) {
+      throw new Error(`Got invalid sized chunk at ${quadsToBytes(block)} (${quadsToBytes(size)} bytes).`);
+    }
+    else if (isFree(int32Array, block)) {
+      checkFreeBlockIntegrity(int32Array, block, size);
+    }
+    else {
+      checkUsedBlockIntegrity(int32Array, block, size);
+    }
+    block += size + POINTER_OVERHEAD_IN_QUADS;
+  }
+  return true;
+}
+
+function checkFreeBlockIntegrity (int32Array: Int32Array, block: int32, blockSize: int32): boolean {
+  /* istanbul ignore if  */
+  if (int32Array[block - 1] !== int32Array[block + blockSize]) {
+    throw new Error(`Block length header does not match footer (${quadsToBytes(int32Array[block - 1])} vs ${quadsToBytes(int32Array[block + blockSize])}).`);
+  }
+  const height: int32 = int32Array[block + HEIGHT_OFFSET_IN_QUADS];
+  /* istanbul ignore if  */
+  if (height < 1 || height > MAX_HEIGHT) {
+    throw new Error(`Block ${quadsToBytes(block)} height must be between 1 and ${MAX_HEIGHT}, got ${height}.`);
+  }
+  for (let i = 0; i < height; i++) {
+    const pointer = int32Array[block + NEXT_OFFSET_IN_QUADS + i];
+    /* istanbul ignore if  */
+    if (pointer >= FIRST_BLOCK_OFFSET_IN_QUADS && !isFree(int32Array, pointer)) {
+      throw new Error(`Block ${quadsToBytes(block)} has a pointer to a non-free block (${quadsToBytes(pointer)}).`);
+    }
+  }
+  return true;
+}
+
+function checkUsedBlockIntegrity (int32Array: Int32Array, block: int32, blockSize: int32): boolean {
+  /* istanbul ignore if  */
+  if (int32Array[block - 1] !== int32Array[block + blockSize]) {
+    throw new Error(`Block length header does not match footer (${quadsToBytes(int32Array[block - 1])} vs ${quadsToBytes(int32Array[block + blockSize])}).`);
+  }
+  else {
+    return true;
+  }
+}
+
+
+/**
  * Inspect the freelist in the given array.
  */
 export function inspect (int32Array: Int32Array): InspectionResult {
@@ -239,28 +317,6 @@ export function inspect (int32Array: Int32Array): InspectionResult {
     block += size + POINTER_OVERHEAD_IN_QUADS;
   }
   return {header, blocks};
-}
-
-/**
- * Write the initial header for an empty int32Array.
- */
-function writeInitialHeader (int32Array: Int32Array) {
-  trace: `Writing initial header.`;
-  const header = HEADER_OFFSET_IN_QUADS;
-  const headerSize = HEADER_SIZE_IN_QUADS;
-  const block = FIRST_BLOCK_OFFSET_IN_QUADS;
-  const blockSize = int32Array.length - (header + headerSize + POINTER_OVERHEAD_IN_QUADS + POINTER_SIZE_IN_QUADS);
-
-  writeFreeBlockSize(int32Array, headerSize, header);
-  int32Array[header + HEIGHT_OFFSET_IN_QUADS] = 1;
-  int32Array[header + NEXT_OFFSET_IN_QUADS] = block;
-  for (let height = 1; height < MAX_HEIGHT; height++) {
-    int32Array[header + NEXT_OFFSET_IN_QUADS + height] = HEADER_OFFSET_IN_QUADS;
-  }
-
-  writeFreeBlockSize(int32Array, blockSize, block);
-  int32Array[block + HEIGHT_OFFSET_IN_QUADS] = 1;
-  int32Array[block + NEXT_OFFSET_IN_QUADS] = header;
 }
 
 /**
@@ -314,9 +370,7 @@ function readSize (int32Array: Int32Array, block: int32): int32 {
     it <= int32Array.length;
     int32Array[block - 1] === int32Array[block + Math.abs(int32Array[block - 1])];
   }
-
-  const size: int32 = int32Array[block - 1];
-  return Math.abs(size);
+  return Math.abs(int32Array[block - 1]);
 }
 
 /**
@@ -351,13 +405,13 @@ function findPredecessors (int32Array: Int32Array, minimumSize: int32): void {
 
   let node: int32 = HEADER_OFFSET_IN_QUADS;
 
-  for (let height = listHeight - 1; height >= 0; --height) {
-    let next: int32 = node + NEXT_OFFSET_IN_QUADS + height;
+  for (let height = listHeight; height > 0; height--) {
+    let next: int32 = node + NEXT_OFFSET_IN_QUADS + (height - 1);
     while (int32Array[next] >= FIRST_BLOCK_OFFSET_IN_QUADS && int32Array[int32Array[next] - 1] < minimumSize) {
       node = int32Array[next];
-      next = node + NEXT_OFFSET_IN_QUADS + height;
+      next = node + NEXT_OFFSET_IN_QUADS + (height - 1);
     }
-    UPDATES[height] = node;
+    UPDATES[height - 1] = node;
   }
 }
 
@@ -381,12 +435,12 @@ function findFreeBlock (int32Array: Int32Array, minimumSize: int32): int32 {
 
   let block: int32 = HEADER_OFFSET_IN_QUADS;
 
-  for (let height = int32Array[HEADER_OFFSET_IN_QUADS + HEIGHT_OFFSET_IN_QUADS]; height >= 0; height--) {
-    let next: int32 = int32Array[block + NEXT_OFFSET_IN_QUADS + height];
+  for (let height = int32Array[HEADER_OFFSET_IN_QUADS + HEIGHT_OFFSET_IN_QUADS]; height > 0; height--) {
+    let next: int32 = int32Array[block + NEXT_OFFSET_IN_QUADS + (height - 1)];
 
     while (next !== HEADER_OFFSET_IN_QUADS && int32Array[next - 1] < minimumSize) {
       block = next;
-      next = int32Array[block + NEXT_OFFSET_IN_QUADS + height];
+      next = int32Array[block + NEXT_OFFSET_IN_QUADS + (height - 1)];
     }
   }
 
@@ -425,12 +479,15 @@ function split (int32Array: Int32Array, block: int32, firstSize: int32, blockSiz
   trace: `Splitting block ${quadsToBytes(block)} (${quadsToBytes(blockSize)} bytes) into ${quadsToBytes(firstSize)} bytes and ${quadsToBytes(secondSize)} bytes.`;
 
   remove(int32Array, block, blockSize);
+  assert: !hasPointersTo(int32Array, block), `All traces of the node must be removed.`;
+
   int32Array[block - 1] = -firstSize;
   int32Array[block + firstSize] = -firstSize;
 
   assert: {
     !isFree(int32Array, block);
   }
+
   trace: "Removed first block, inserting second.";
   int32Array[second - 1] = -secondSize;
   int32Array[second + secondSize] = -secondSize;
@@ -453,11 +510,11 @@ function remove (int32Array: Int32Array, block: int32, blockSize: int32): void {
   post: {
     int32Array[block - 1] === -blockSize, "Block is marked as allocated.";
     int32Array[block + blockSize] === -blockSize, "Block is marked as allocated.";
+    !hasPointersTo(int32Array, block), `All traces of the block (${quadsToBytes(block)}) must be removed. ${UPDATES.map(quadsToBytes).join(', ')}`;
   }
 
   trace: `Removing block ${quadsToBytes(block)} (${quadsToBytes(blockSize)} bytes).`;
   findPredecessors(int32Array, blockSize);
-
 
   let node: int32 = int32Array[UPDATES[0] + NEXT_OFFSET_IN_QUADS];
 
@@ -494,6 +551,27 @@ function remove (int32Array: Int32Array, block: int32, blockSize: int32): void {
   // invert the size sign to signify an allocated block
   int32Array[block - 1] = -blockSize;
   int32Array[block + blockSize] = -blockSize;
+}
+
+/**
+ * Iterate all of the free blocks in the list, looking for pointers to the given block.
+ */
+function hasPointersTo (int32Array: Int32Array, block: int32): boolean {
+  let next: int32 = FIRST_BLOCK_OFFSET_IN_QUADS;
+
+  while (next < int32Array.length - POINTER_SIZE_IN_QUADS) {
+    if (isFree(int32Array, next)) {
+      for (let height = int32Array[next + HEIGHT_OFFSET_IN_QUADS] - 1; height >= 0; height--) {
+        const pointer: int32 = int32Array[next + NEXT_OFFSET_IN_QUADS + height];
+        if (pointer === block) {
+          /* istanbul ignore if  */
+          return true;
+        }
+      }
+    }
+    next += readSize(int32Array, next) + POINTER_OVERHEAD_IN_QUADS;
+  }
+  return false;
 }
 
 /**
@@ -578,6 +656,10 @@ function getFreeBlockAfter (int32Array: Int32Array, block: int32): int32 {
   }
 
   const blockSize: int32 = readSize(int32Array, block);
+  if (block + blockSize + POINTER_OVERHEAD_IN_QUADS >= int32Array.length - 2) {
+    // Block is the last in the list.
+    return 0;
+  }
   const next: int32 = (block + blockSize + POINTER_OVERHEAD_IN_QUADS);
   const nextSize: int32 = int32Array[next - POINTER_SIZE_IN_QUADS];
 
@@ -616,13 +698,13 @@ function insert (int32Array: Int32Array, block: int32, blockSize: int32): int32 
   const blockHeight: int32 = generateHeight(int32Array, block, blockSize);
   const listHeight: int32 = int32Array[HEADER_OFFSET_IN_QUADS + HEIGHT_OFFSET_IN_QUADS];
 
-  for (let height = 0; height < blockHeight; height++) {
-    assert: UPDATES[height] > 0;
-    const update: int32 = UPDATES[height] + NEXT_OFFSET_IN_QUADS + height;
+  for (let height = 1; height <= blockHeight; height++) {
+    assert: UPDATES[height - 1] > 0;
+    const update: int32 = UPDATES[height - 1] + NEXT_OFFSET_IN_QUADS + (height - 1);
     trace: `Writing next (${height}) pointer (${quadsToBytes(UPDATES[height])}) to ${quadsToBytes(block)}.`;
-    int32Array[block + NEXT_OFFSET_IN_QUADS + height] = int32Array[update];
+    int32Array[block + NEXT_OFFSET_IN_QUADS + (height - 1)] = int32Array[update];
     int32Array[update] = block;
-    UPDATES[height] = HEADER_OFFSET_IN_QUADS;
+    UPDATES[height - 1] = HEADER_OFFSET_IN_QUADS;
   }
 
   int32Array[block - 1] = blockSize;
@@ -635,7 +717,7 @@ function insert (int32Array: Int32Array, block: int32, blockSize: int32): int32 
  * Insert the given block into the freelist before the given free block,
  * joining them together, returning the number of bytes which were freed.
  */
-function insertBefore (int32Array: Int32Array, trailing: int32, block: int32): int32 {
+function insertBefore (int32Array: Int32Array, trailing: int32, block: int32, blockSize: int32): int32 {
   pre: {
     block > 0;
     trailing > block;
@@ -646,7 +728,6 @@ function insertBefore (int32Array: Int32Array, trailing: int32, block: int32): i
     it < int32Array.length;
   }
 
-  const blockSize: int32 = readSize(int32Array, block);
   const trailingSize: int32 = readSize(int32Array, trailing);
   trace: `Inserting block ${quadsToBytes(block)} (${quadsToBytes(blockSize)} bytes) before block ${quadsToBytes(trailing)} (${quadsToBytes(trailingSize)} bytes).`;
   remove(int32Array, trailing, trailingSize);
@@ -661,7 +742,7 @@ function insertBefore (int32Array: Int32Array, trailing: int32, block: int32): i
  * Insert the given block into the freelist in between the given free blocks,
  * joining them together, returning the number of bytes which were freed.
  */
-function insertMiddle (int32Array: Int32Array, preceding: int32, block: int32, trailing: int32): int32 {
+function insertMiddle (int32Array: Int32Array, preceding: int32, block: int32, blockSize: int32, trailing: int32): int32 {
   pre: {
     block > 0;
     preceding < block;
@@ -673,7 +754,6 @@ function insertMiddle (int32Array: Int32Array, preceding: int32, block: int32, t
     it < int32Array.length;
   }
 
-  const blockSize: int32 = readSize(int32Array, block);
   const precedingSize: int32 = readSize(int32Array, preceding);
   const trailingSize: int32 = readSize(int32Array, trailing);
   const size: int32 = ((trailing - preceding) + trailingSize);
@@ -692,7 +772,7 @@ function insertMiddle (int32Array: Int32Array, preceding: int32, block: int32, t
  * Insert the given block into the freelist after the given free block,
  * joining them together, returning the number of bytes which were freed.
  */
-function insertAfter (int32Array: Int32Array, preceding: int32, block: int32): int32 {
+function insertAfter (int32Array: Int32Array, preceding: int32, block: int32, blockSize: int32): int32 {
   pre: {
     block > 0;
     preceding < block;
@@ -704,7 +784,6 @@ function insertAfter (int32Array: Int32Array, preceding: int32, block: int32): i
   }
 
   const precedingSize: int32 = (block - preceding) - POINTER_OVERHEAD_IN_QUADS;
-  const blockSize: int32 = readSize(int32Array, block);
 
   trace: `Inserting block ${quadsToBytes(block)} (${quadsToBytes(blockSize)} bytes) after block ${quadsToBytes(preceding)} (${quadsToBytes(precedingSize)} bytes).`;
 
@@ -735,8 +814,10 @@ function generateHeight (int32Array: Int32Array, block: int32, blockSize: int32)
   const listHeight: int32 = int32Array[HEADER_OFFSET_IN_QUADS + HEIGHT_OFFSET_IN_QUADS];
   let height: int32 = randomHeight();
 
-  if (blockSize < height + 1) {
-    height = blockSize - 1;
+  trace: `Generating a block height for block ${quadsToBytes(block)} (${quadsToBytes(blockSize)} bytes, ${blockSize} quads), got ${height}.`;
+
+  if (blockSize - 1 < height + 1) {
+    height = blockSize - 2;
     trace: `Block size is too small for the generated height, reducing height to ${height}.`;
   }
 

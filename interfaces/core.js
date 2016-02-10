@@ -124,6 +124,8 @@ declare class Int32Array extends ArrayBufferView {
     subarray(begin: number, end?: number): Int32Array;
     slice(begin: number, end?: number): Array<number>;
     fill(value: number, begin?: number, end?: number): Int32Array;
+    map(visitor: Function): Int32Array;
+    join(separator?: string): string;
 }
 
 declare class Uint32Array extends ArrayBufferView {

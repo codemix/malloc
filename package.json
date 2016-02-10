@@ -1,6 +1,6 @@
 {
   "name": "malloc",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Simple malloc() & free() implementation on top of buffers and array buffers.",
   "main": "index.js",
   "directories": {
@@ -24,7 +24,7 @@
     "should": "^7.1.1"
   },
   "scripts": {
-    "prepublish": "NODE_ENV=production npm run build",
+    "prepublish": "NODE_ENV=production npm run build && npm run test",
     "test": "flow && mocha --max-old-space-size=8192 --expose-gc",
     "watch": "mocha --watch --max-old-space-size=8192 --expose-gc",
     "build": "babel -d ./lib ./src",

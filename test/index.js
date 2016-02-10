@@ -19,6 +19,11 @@ describe('Allocator', function () {
       it('should prepare the header', function () {
         verifyHeader(instance.int32Array).should.equal(true);
       });
+
+      it('should create a new instance from an existing buffer', function () {
+        const dupe = new Allocator(instance.buffer);
+        verifyHeader(dupe.int32Array).should.equal(true);
+      });
     });
 
     describe('ArrayBuffer', function () {
@@ -42,7 +47,19 @@ describe('Allocator', function () {
       it('should not accept an array', function () {
         (() => new Allocator([1,2,3])).should.throw(TypeError);
       });
+
+      });
+
+    describe('ArrayBuffer offset', function () {
+      it('should create a new instance with a byte offset', function () {
+        const instance = new Allocator(new ArrayBuffer(1024), 4);
+      });
+
+      it('should create a new instance with byte offsets and lengths', function () {
+        const instance = new Allocator(new ArrayBuffer(4096), 4, 1024);
+      });
     });
+
   });
 
   describe('Out of memory', function () {
@@ -81,11 +98,10 @@ describe('Allocator', function () {
       const addresses2 = Array.from({length: 10}, (_, index) => instance.alloc(index % 2 ? 64 : 128));
       addresses2.forEach(address => instance.free(address));
 
-      d(instance.inspect());
     });
   });
 
-  describe('bad alloc() and free()', function () {
+  describe('bad alloc(), sizeOf() and free()', function () {
     let instance = new Allocator(new Buffer(4096).fill(127));
     it('should fail to allocate less than the minimum freeable size', function () {
       (() => instance.alloc(8)).should.throw(RangeError);
@@ -111,12 +127,60 @@ describe('Allocator', function () {
       (() => instance.free(16)).should.throw(RangeError);
     });
 
+    it('should not free an address with an invalid alignment', function () {
+      (() => instance.free(777)).should.throw(RangeError);
+    });
+
     it('should not free an address larger than the array', function () {
       (() => instance.free(4096 * 2)).should.throw(RangeError);
     });
 
     it('should not free an unallocated address', function () {
       (() => instance.free(1024)).should.throw(Error);
+    });
+
+    it('should not check the size of an address within the header', function () {
+      (() => instance.sizeOf(20)).should.throw(Error);
+    });
+
+    it('should not check the size of a negative address', function () {
+      (() => instance.sizeOf(20)).should.throw(Error);
+    });
+
+    it('should not check the size of a too-large address', function () {
+      (() => instance.sizeOf(Math.pow(2,32))).should.throw(Error);
+    });
+
+    it('should not check the size of an invalid address', function () {
+      (() => instance.sizeOf(777)).should.throw(Error);
+    });
+  });
+
+  describe('Alloc() exhaustively', function () {
+    let instance = new Allocator(new Buffer(4096).fill(127));
+    const addresses = [];
+    it('should repeatedly allocate 16 byte chunks until it exhausts the available space', function () {
+      let prev = 0;
+      let next = 0;
+      let counter = 0;
+      while ((next = instance.alloc(16)) !== 0) {
+        prev = next;
+        addresses.push(next);
+        counter++;
+      }
+      counter.should.equal(159);
+    });
+
+    it('should check the size of all the addresses', function () {
+      addresses.forEach(address => {
+        instance.sizeOf(address).should.be.within(16, 32);
+      });
+    });
+
+    it('should free all the available addresses in reverse order', function () {
+      addresses.reverse().forEach(address => {
+        instance.free(address).should.be.within(16, 32);
+      });
     });
   });
 
@@ -133,7 +197,7 @@ describe('Allocator', function () {
     ]);
   }
 
-  (process.env.NODE_ENV === "coverage" ? describe.skip : describe)('Benchmarks', function () {
+  (process.env.NODE_ENV !== "production" ? describe.skip : describe)('Benchmarks', function () {
     let buffer = new Buffer(1024 * 1024 * 20);
     let instance;
     beforeEach(() => {
@@ -141,10 +205,13 @@ describe('Allocator', function () {
       instance = new Allocator(buffer);
     });
 
-    after(() => {
-      buffer = null;
+    afterEach(() => {
       instance.buffer = null;
       instance = null;
+    });
+
+    after(() => {
+      buffer = null;
       if (typeof gc === 'function') {
         gc();
       }
@@ -156,7 +223,7 @@ describe('Allocator', function () {
       }
     });
 
-    benchmark('allocate and free', 100000, {
+    benchmark('allocate and free', 1000000, {
       alloc () {
         instance.free(instance.alloc(128));
       }
@@ -416,7 +483,7 @@ function createBenchmark () {
 }
 
 function ensureDeterministicRandom () {
-  let index = 0;
+  let index = 21;
   Math.random = function () {
     return randomNumbers[index++ % randomNumbers.length];
   };
