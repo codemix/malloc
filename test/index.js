@@ -11,6 +11,7 @@ describe('Allocator', function () {
   describe('constructor()', function () {
     describe('Buffer', function () {
       let instance;
+      let dupe;
 
       it('should create a new instance', function () {
         instance = new Allocator(new Buffer(1024).fill(123));
@@ -21,8 +22,15 @@ describe('Allocator', function () {
       });
 
       it('should create a new instance from an existing buffer', function () {
-        const dupe = new Allocator(instance.buffer);
+        dupe = new Allocator(instance.buffer, instance.byteOffset, instance.byteLength);
         verifyHeader(dupe.int32Array).should.equal(true);
+      });
+
+      it('should allocate from both instances correctly', function () {
+        const address1 = instance.alloc(16);
+        const address2 = dupe.alloc(16);
+        address2.should.be.above(address1);
+        address2.should.equal(address1 + 16 + 8);
       });
     });
 
@@ -48,7 +56,17 @@ describe('Allocator', function () {
         (() => new Allocator([1,2,3])).should.throw(TypeError);
       });
 
+    });
+
+    describe('Buffer offset', function () {
+      it('should create a new instance with a byte offset', function () {
+        const instance = new Allocator(new Buffer(1024), 4);
       });
+
+      it('should create a new instance with byte offsets and lengths', function () {
+        const instance = new Allocator(new Buffer(4096), 4, 1024);
+      });
+    });
 
     describe('ArrayBuffer offset', function () {
       it('should create a new instance with a byte offset', function () {
@@ -101,22 +119,39 @@ describe('Allocator', function () {
     });
   });
 
-  describe('bad alloc(), sizeOf() and free()', function () {
+  describe('.calloc()', function () {
     let instance = new Allocator(new Buffer(4096).fill(127));
-    it('should fail to allocate less than the minimum freeable size', function () {
-      (() => instance.alloc(8)).should.throw(RangeError);
+    it('should allocate some bytes and clear them', function () {
+      const address = instance.calloc(128);
+      const uint8Array = new Uint8Array(instance.buffer);
+      for (let i = 0; i < 128; i++) {
+        uint8Array[address + i].should.equal(0);
+      }
+    });
+
+    it('should allocate and clear less than the minimum allocation size', function () {
+      const address = instance.calloc(8);
+      const uint8Array = new Uint8Array(instance.buffer);
+      for (let i = 0; i < 16; i++) {
+        uint8Array[address + i].should.equal(0);
+      }
+    });
+
+    it('should fail to allocate too many bytes', function () {
+      instance.calloc(3820).should.equal(0);
+    });
+  });
+
+  describe('alloc(), sizeOf() and free()', function () {
+    let instance = new Allocator(new Buffer(4096).fill(127));
+
+    it('should alloc() less than the minimum size', function () {
+      const address = instance.alloc(1);
+      instance.sizeOf(address).should.equal(16);
     });
 
     it('should fail to allocate more than the capacity', function () {
       (() => instance.alloc(4096 * 2)).should.throw(RangeError);
-    });
-
-    it('should fail to allocate an unaligned size', function () {
-      (() => instance.alloc(33)).should.throw(RangeError);
-    });
-
-    it('should fail to allocate a non integral number of bytes', function () {
-      (() => instance.alloc(40.33)).should.throw(Error);
     });
 
     it('should not free an invalid address', function () {
